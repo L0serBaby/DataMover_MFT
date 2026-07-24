@@ -1,0 +1,32 @@
+# Portable runtime + service wrapper binaries — download separately, don't commit
+runtime/*
+!runtime/.gitkeep
+nssm/*
+!nssm/.gitkeep
+
+# Local app state — never commit real credentials/history
+data/*
+!data/.gitkeep
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# TLS material
+certs/*.crt
+certs/*.key
+certs/*.pem
+certs/*.p12
+certs/*.pfx
+
+# Dependencies
+node_modules/
+
+# Build artifacts
+*.zip
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+*.tmp
