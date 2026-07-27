@@ -83,6 +83,70 @@
     </div>
   </div>
 
+  <!-- ═══ TLS / PORT SETUP ════════════════════════════════════════════════ -->
+  <!-- Shown right after the forced password change, equally undismissable —
+       wired through the same enterApp() decision point so the three entry
+       paths (login, /me on refresh, post-password-change) can't disagree. -->
+  <div id="tls-setup-screen" class="login-screen hidden">
+    <div class="login-card">
+      <div class="login-brand">
+        <svg width="40" height="40" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="8" fill="#3b82f6"/>
+          <path d="M7 16h18M19 10l6 6-6 6" stroke="white" stroke-width="2.5"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div>
+          <div class="login-brand-name">DataMover</div>
+          <div class="login-brand-sub">Secure this connection</div>
+        </div>
+      </div>
+
+      <div id="tls-step-cert">
+        <p class="setup-intro">
+          Generate a self-signed certificate so the admin UI and credentials never
+          travel in plaintext. Browsers will show a one-time warning for a
+          self-signed cert — that's expected.
+        </p>
+        <div class="field">
+          <label for="tls-hostname">Hostname</label>
+          <input id="tls-hostname" type="text" autocomplete="off" spellcheck="false" required>
+        </div>
+        <div id="tls-cert-err" class="alert alert-error hidden"></div>
+        <div id="tls-cert-result" class="alert alert-success hidden"></div>
+        <button id="tls-generate-btn" class="btn btn-secondary w-full" type="button">
+          Generate self-signed certificate
+        </button>
+      </div>
+
+      <p id="tls-behind-proxy-note" class="setup-intro hidden">
+        BEHIND_TLS_PROXY is set — a reverse proxy is expected to terminate TLS, so
+        local certificate generation is skipped. Choose the port DataMover itself
+        listens on below.
+      </p>
+
+      <div class="field">
+        <label for="tls-port-select">Port</label>
+        <select id="tls-port-select">
+          <option value="8443">8443 (recommended)</option>
+          <option value="9443">9443</option>
+          <option value="4443">4443</option>
+          <option value="443">443 — commonly conflicts with IIS or an existing http.sys reservation</option>
+          <option value="__custom__">Custom…</option>
+        </select>
+      </div>
+      <div class="field hidden" id="tls-port-custom-field">
+        <label for="tls-port-custom">Custom port</label>
+        <input id="tls-port-custom" type="number" min="1" max="65535">
+      </div>
+      <div id="tls-port-status" class="text-sm"></div>
+
+      <div id="tls-complete-err" class="alert alert-error hidden"></div>
+      <button id="tls-complete-btn" class="btn btn-primary w-full" type="button" disabled>
+        Finish setup
+      </button>
+    </div>
+  </div>
+
   <!-- ═══ APP SHELL ════════════════════════════════════════════════════ -->
   <div id="app" class="app hidden">
 

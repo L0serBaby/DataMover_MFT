@@ -97,10 +97,10 @@ router.post('/login', async (req, res) => {
     req.session.user = user;
     _rlClear(rlKey); // successful login clears the counter
     logger.info(`[auth] Login — user="${user.username}" ip=${req.socket?.remoteAddress || req.ip || 'unknown'}`);
-    // Full user object (id/mustChangePassword included) — enterApp() on the
-    // client needs mustChangePassword to decide whether to show the forced
-    // password screen or the app itself.
-    res.json({ ...user });
+    // Full user object (id/mustChangePassword included) plus instance-level
+    // setup state — enterApp() on the client needs both to decide whether to
+    // show the forced-password screen, the TLS/port wizard, or the app itself.
+    res.json({ ...user, setupComplete: auth.isSetupComplete() });
   } catch (err) {
     _rlRecord(rlKey); // count failed attempts
     logger.warn(`[auth] Login failed — ip=${req.socket?.remoteAddress || req.ip || 'unknown'}`);
@@ -123,7 +123,7 @@ router.post('/logout', async (req, res) => {
 // GET /api/auth/me
 router.get('/me', (req, res) => {
   if (!req.session?.user) return res.status(401).json({ error: 'Not authenticated' });
-  res.json(req.session.user);
+  res.json({ ...req.session.user, setupComplete: auth.isSetupComplete() });
 });
 
 // ── User management ───────────────────────────────────────────────────────────

@@ -43,6 +43,12 @@ function loadConfig() {
   }
 }
 
+function saveConfig(cfg) {
+  const tmp = _configFile + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
+  fs.renameSync(tmp, _configFile);
+}
+
 async function bootstrap() {
   // Compute dummy hash first — same rounds as stored passwords for timing parity
   _dummyHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), BCRYPT_ROUNDS);
@@ -62,6 +68,33 @@ async function bootstrap() {
 
   // Log username only — never log the default password
   logger.warn('[auth] Default admin user created (username: admin) — change the password immediately via Settings');
+}
+
+function isSetupComplete() {
+  return Boolean(loadConfig().SETUP_COMPLETED_AT);
+}
+
+// Upgrade path: an install predating the forced-setup flow has users.json
+// populated and none of them pending a forced password change, but no
+// SETUP_COMPLETED_AT marker either (that field didn't exist yet). Mark it
+// complete so an existing admin isn't dragged into the TLS wizard on their
+// next login. Idempotent and safe to call on every boot — same shape as
+// migratePgpKeys in server.js.
+function ensureSetupCompletedForExistingInstall() {
+  const config = loadConfig();
+  if (config.SETUP_COMPLETED_AT) return;
+
+  const users = loadUsers();
+  if (users.length === 0) return;                    // fresh install — real flow applies
+  if (users.some(u => u.mustChangePassword)) return;  // still pending — real flow applies
+
+  config.SETUP_COMPLETED_AT = new Date().toISOString();
+  try {
+    saveConfig(config);
+    logger.info('[auth] Existing install retroactively marked setup-complete (no pending password changes found)');
+  } catch (err) {
+    logger.error(`[auth] Failed to write SETUP_COMPLETED_AT during upgrade migration: ${err.message}`);
+  }
 }
 
 function initAuth(app, { tlsEnabled = false, behindTlsProxy = false } = {}) {
@@ -145,6 +178,9 @@ function requireSetupComplete(req, res, next) {
   if (user?.mustChangePassword) {
     return res.status(403).json({ error: 'Password change required', mustChangePassword: true });
   }
+  if (!isSetupComplete()) {
+    return res.status(403).json({ error: 'Initial setup required', setupComplete: false });
+  }
   next();
 }
 
@@ -176,5 +212,6 @@ function _setFilePaths({ usersFile, configFile } = {}) {
 
 module.exports = {
   initAuth, login, logout, requireAuth, requireAdmin, requireSetupComplete,
-  validateForcedPasswordChange, _setFilePaths, _bootstrap: bootstrap,
+  validateForcedPasswordChange, isSetupComplete, ensureSetupCompletedForExistingInstall,
+  _setFilePaths, _bootstrap: bootstrap,
 };

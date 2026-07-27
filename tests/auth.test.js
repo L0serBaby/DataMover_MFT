@@ -16,11 +16,18 @@ const tmpUsers  = path.join(TMP, `dm_test_users_${crypto.randomBytes(4).toString
 const tmpConfig = path.join(TMP, `dm_test_config_${crypto.randomBytes(4).toString('hex')}.json`);
 
 fs.writeFileSync(tmpUsers,  '[]', 'utf8');
-fs.writeFileSync(tmpConfig, JSON.stringify({ SESSION_TIMEOUT_MINUTES: 15 }), 'utf8');
+// SETUP_COMPLETED_AT defaults present so existing tests below (written before
+// the TLS/port step existed) aren't dragged into that gate — the handful of
+// tests specific to it manage the field explicitly.
+fs.writeFileSync(tmpConfig, JSON.stringify({
+  SESSION_TIMEOUT_MINUTES: 15,
+  SETUP_COMPLETED_AT: '2020-01-01T00:00:00.000Z',
+}), 'utf8');
 
 const {
   login, logout, requireAuth, requireAdmin, requireSetupComplete,
-  validateForcedPasswordChange, _setFilePaths, _bootstrap,
+  validateForcedPasswordChange, isSetupComplete, ensureSetupCompletedForExistingInstall,
+  _setFilePaths, _bootstrap,
 } = require('../app/auth');
 _setFilePaths({ usersFile: tmpUsers, configFile: tmpConfig });
 
@@ -74,6 +81,16 @@ function readUsers() {
 function writeUsers(users) {
   fs.writeFileSync(tmpUsers, JSON.stringify(users, null, 2), 'utf8');
 }
+
+function readConfigFile() {
+  return JSON.parse(fs.readFileSync(tmpConfig, 'utf8'));
+}
+
+function writeConfigFile(cfg) {
+  fs.writeFileSync(tmpConfig, JSON.stringify(cfg, null, 2), 'utf8');
+}
+
+const DEFAULT_TEST_CONFIG = { SESSION_TIMEOUT_MINUTES: 15, SETUP_COMPLETED_AT: '2020-01-01T00:00:00.000Z' };
 
 function makeRes() {
   return {
@@ -302,6 +319,78 @@ function makeRes() {
     requireSetupComplete(req, res, () => { called = true; });
     assert(called, 'next() should have been called once the flag is cleared');
     assertEqual(res._status, null);
+  });
+
+  // ── SETUP_COMPLETED_AT / TLS-port step gate ───────────────────────────────
+
+  await test('isSetupComplete reflects config.json SETUP_COMPLETED_AT', () => {
+    writeConfigFile({ ...DEFAULT_TEST_CONFIG });
+    assertEqual(isSetupComplete(), true);
+
+    const { SETUP_COMPLETED_AT, ...withoutMarker } = readConfigFile();
+    writeConfigFile(withoutMarker);
+    assertEqual(isSetupComplete(), false);
+
+    writeConfigFile(DEFAULT_TEST_CONFIG); // restore for subsequent tests
+  });
+
+  await test('requireSetupComplete rejects when SETUP_COMPLETED_AT is missing, even with no pending password change', () => {
+    const { SETUP_COMPLETED_AT, ...withoutMarker } = DEFAULT_TEST_CONFIG;
+    writeConfigFile(withoutMarker);
+    writeUsers([{ id: 'setup-1', username: 'admin', passwordHash: 'h', role: 'admin', createdAt: 'now' }]);
+
+    const req = { session: { user: { id: 'setup-1', username: 'admin', role: 'admin' } } };
+    const res = makeRes();
+    let called = false;
+    try {
+      requireSetupComplete(req, res, () => { called = true; });
+      assert(!called, 'next() should not have been called');
+      assertEqual(res._status, 403);
+      assertEqual(res._body.error, 'Initial setup required');
+      assertEqual(res._body.setupComplete, false);
+    } finally {
+      writeConfigFile(DEFAULT_TEST_CONFIG); // restore for subsequent tests
+    }
+  });
+
+  await test('upgrade path: existing users with no pending change and no SETUP_COMPLETED_AT get the marker written', () => {
+    const { SETUP_COMPLETED_AT, ...withoutMarker } = DEFAULT_TEST_CONFIG;
+    writeConfigFile(withoutMarker);
+    writeUsers([{ id: 'up-1', username: 'admin', passwordHash: 'h', role: 'admin', createdAt: 'now' }]);
+
+    try {
+      ensureSetupCompletedForExistingInstall();
+      assert(readConfigFile().SETUP_COMPLETED_AT, 'SETUP_COMPLETED_AT should have been written');
+      assertEqual(isSetupComplete(), true);
+    } finally {
+      writeConfigFile(DEFAULT_TEST_CONFIG); // restore for subsequent tests
+    }
+  });
+
+  await test('upgrade migration does nothing while a user still has a pending password change', () => {
+    const { SETUP_COMPLETED_AT, ...withoutMarker } = DEFAULT_TEST_CONFIG;
+    writeConfigFile(withoutMarker);
+    writeUsers([{ id: 'up-2', username: 'admin', passwordHash: 'h', role: 'admin', createdAt: 'now', mustChangePassword: true }]);
+
+    try {
+      ensureSetupCompletedForExistingInstall();
+      assert(!readConfigFile().SETUP_COMPLETED_AT, 'SETUP_COMPLETED_AT should not be written while a change is pending');
+    } finally {
+      writeConfigFile(DEFAULT_TEST_CONFIG); // restore for subsequent tests
+    }
+  });
+
+  await test('upgrade migration does nothing for a fresh install (no users yet)', () => {
+    const { SETUP_COMPLETED_AT, ...withoutMarker } = DEFAULT_TEST_CONFIG;
+    writeConfigFile(withoutMarker);
+    writeUsers([]);
+
+    try {
+      ensureSetupCompletedForExistingInstall();
+      assert(!readConfigFile().SETUP_COMPLETED_AT, 'SETUP_COMPLETED_AT should not be written for a fresh install');
+    } finally {
+      writeConfigFile(DEFAULT_TEST_CONFIG); // restore for subsequent tests
+    }
   });
 
   // ── config ─────────────────────────────────────────────────────────────────

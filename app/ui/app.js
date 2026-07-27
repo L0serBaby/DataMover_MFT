@@ -200,6 +200,7 @@ function showLogin(msg) {
   stopHeartbeat();
   document.getElementById('login-screen').classList.remove('hidden');
   document.getElementById('setup-screen').classList.add('hidden');
+  document.getElementById('tls-setup-screen').classList.add('hidden');
   document.getElementById('app').classList.add('hidden');
   const errEl = document.getElementById('login-err');
   if (errEl) {
@@ -222,6 +223,7 @@ function hideLogin() {
 function showSetupScreen() {
   stopHeartbeat();
   document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('tls-setup-screen').classList.add('hidden');
   document.getElementById('app').classList.add('hidden');
   document.getElementById('setup-screen').classList.remove('hidden');
   requestAnimationFrame(() => {
@@ -235,13 +237,19 @@ function hideSetupScreen() {
 }
 
 // Single decision point for "what to show once we know who's logged in" —
-// used after both login and the initial /api/auth/me check on page load, so
-// the two entry points can never disagree about whether setup is required.
+// used after login, after the forced-password-change form, and after the
+// initial /api/auth/me check on page load, so none of those three entry
+// points can disagree about which step (if any) is still outstanding.
 function enterApp() {
   if (app.user?.mustChangePassword) {
+    hideTlsSetupScreen();
     showSetupScreen();
+  } else if (!app.user?.setupComplete) {
+    hideSetupScreen();
+    showTlsSetupScreen();
   } else {
     hideSetupScreen();
+    hideTlsSetupScreen();
     hideLogin();
     bootApp();
   }
@@ -284,6 +292,217 @@ document.getElementById('setup-form').addEventListener('submit', async ev => {
     btn.textContent = 'Change password';
   }
 });
+
+// ════════════════════════════════════════════════════════════════════════
+//  TLS / PORT SETUP  (shown once, right after the forced password change)
+// ════════════════════════════════════════════════════════════════════════
+
+const tlsSetup = {
+  behindTlsProxy: false,
+  certReady:      false,
+  portAvailable:  false,
+  fingerprint:    null,
+  notAfter:       null,
+};
+
+function hideTlsSetupScreen() {
+  document.getElementById('tls-setup-screen').classList.add('hidden');
+}
+
+function showTlsSetupScreen() {
+  stopHeartbeat();
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('setup-screen').classList.add('hidden');
+  document.getElementById('app').classList.add('hidden');
+  document.getElementById('tls-setup-screen').classList.remove('hidden');
+  initTlsSetupScreen();
+}
+
+function tlsSelectedPort() {
+  const sel = document.getElementById('tls-port-select');
+  if (sel.value === '__custom__') {
+    return parseInt(document.getElementById('tls-port-custom').value, 10);
+  }
+  return parseInt(sel.value, 10);
+}
+
+function updateTlsCompleteButton() {
+  const btn = document.getElementById('tls-complete-btn');
+  const certOk = tlsSetup.behindTlsProxy || tlsSetup.certReady;
+  btn.disabled = !(certOk && tlsSetup.portAvailable);
+}
+
+async function checkTlsPortAvailability() {
+  const statusEl = document.getElementById('tls-port-status');
+  const port = tlsSelectedPort();
+  tlsSetup.portAvailable = false;
+  updateTlsCompleteButton();
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    statusEl.textContent = 'Enter a port between 1 and 65535.';
+    statusEl.className   = 'text-sm text-danger';
+    return;
+  }
+
+  statusEl.textContent = 'Checking availability…';
+  statusEl.className   = 'text-sm text-muted';
+
+  try {
+    const result = await API.getJSON(`/api/setup/port-check?port=${encodeURIComponent(port)}`);
+    if (result?.available) {
+      tlsSetup.portAvailable = true;
+      statusEl.textContent = 'Port is available.';
+      statusEl.className   = 'text-sm text-success';
+    } else {
+      statusEl.textContent = result?.reason || 'Port is not available.';
+      statusEl.className   = 'text-sm text-danger';
+    }
+  } catch (err) {
+    statusEl.textContent = err.message || 'Could not check port.';
+    statusEl.className   = 'text-sm text-danger';
+  }
+  updateTlsCompleteButton();
+}
+
+async function initTlsSetupScreen() {
+  const hostnameInput = document.getElementById('tls-hostname');
+  const certSection    = document.getElementById('tls-step-cert');
+  const proxyNote      = document.getElementById('tls-behind-proxy-note');
+
+  let info = null;
+  try { info = await API.getJSON('/api/setup/info'); } catch { /* fall through with defaults */ }
+
+  tlsSetup.behindTlsProxy = Boolean(info?.behindTlsProxy);
+  tlsSetup.certReady      = tlsSetup.behindTlsProxy; // no cert needed when a proxy terminates TLS
+
+  if (hostnameInput) hostnameInput.value = info?.suggestedHostname || '';
+
+  if (tlsSetup.behindTlsProxy) {
+    certSection.classList.add('hidden');
+    proxyNote.classList.remove('hidden');
+  } else {
+    certSection.classList.remove('hidden');
+    proxyNote.classList.add('hidden');
+  }
+
+  await checkTlsPortAvailability();
+  updateTlsCompleteButton();
+
+  requestAnimationFrame(() => {
+    if (hostnameInput && !tlsSetup.behindTlsProxy) hostnameInput.focus();
+  });
+}
+
+document.getElementById('tls-port-select').addEventListener('change', ev => {
+  document.getElementById('tls-port-custom-field').classList.toggle('hidden', ev.target.value !== '__custom__');
+  checkTlsPortAvailability();
+});
+
+document.getElementById('tls-port-custom').addEventListener('input', () => {
+  checkTlsPortAvailability();
+});
+
+document.getElementById('tls-generate-btn').addEventListener('click', async () => {
+  const errEl    = document.getElementById('tls-cert-err');
+  const resultEl = document.getElementById('tls-cert-result');
+  const btn      = document.getElementById('tls-generate-btn');
+  const hostname = document.getElementById('tls-hostname').value.trim();
+
+  errEl.classList.add('hidden');
+  resultEl.classList.add('hidden');
+
+  if (!hostname) {
+    errEl.textContent = 'Hostname is required.';
+    errEl.classList.remove('hidden');
+    return;
+  }
+
+  btn.disabled    = true;
+  btn.textContent = 'Generating…';
+
+  try {
+    const r = await API.postJSON('/api/setup/tls/generate', { hostname });
+    tlsSetup.certReady   = true;
+    tlsSetup.fingerprint = r.fingerprint;
+    tlsSetup.notAfter    = r.notAfter;
+    resultEl.textContent = `Certificate generated for "${hostname}" — fingerprint ${r.fingerprint}, expires ${new Date(r.notAfter).toLocaleDateString()}.`;
+    resultEl.classList.remove('hidden');
+  } catch (err) {
+    errEl.textContent = err.message || 'Certificate generation failed.';
+    errEl.classList.remove('hidden');
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = 'Generate self-signed certificate';
+    updateTlsCompleteButton();
+  }
+});
+
+document.getElementById('tls-complete-btn').addEventListener('click', async () => {
+  const errEl    = document.getElementById('tls-complete-err');
+  const btn      = document.getElementById('tls-complete-btn');
+  const hostname = document.getElementById('tls-hostname').value.trim();
+  const port     = tlsSelectedPort();
+
+  errEl.classList.add('hidden');
+  btn.disabled    = true;
+  btn.textContent = 'Finishing…';
+
+  try {
+    await API.postJSON('/api/setup/complete', { port });
+    renderTlsSetupDone(hostname, port);
+  } catch (err) {
+    errEl.textContent = err.message || 'Could not complete setup.';
+    errEl.classList.remove('hidden');
+    btn.disabled    = false;
+    btn.textContent = 'Finish setup';
+  }
+});
+
+// Replaces the card contents with the final instructions — this is the last
+// thing shown before the admin restarts the service; there is nothing left
+// to navigate to from here.
+function renderTlsSetupDone(hostname, port) {
+  stopHeartbeat();
+  const url        = `https://${hostname}:${port}`;
+  const restartCmd = 'net stop DataMover && net start DataMover';
+  const fp         = tlsSetup.fingerprint;
+
+  const card = document.querySelector('#tls-setup-screen .login-card');
+  card.innerHTML = `
+    <div class="login-brand">
+      <svg width="40" height="40" viewBox="0 0 32 32" fill="none">
+        <rect width="32" height="32" rx="8" fill="#3b82f6"/>
+        <path d="M7 16h18M19 10l6 6-6 6" stroke="white" stroke-width="2.5"
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <div class="login-brand-name">DataMover</div>
+        <div class="login-brand-sub">Setup complete</div>
+      </div>
+    </div>
+    <p class="setup-intro">
+      Restart the service for the new settings to take effect, then reconnect at the address below.
+    </p>
+    <div class="field">
+      <label>New URL</label>
+      <div class="font-mono text-sm">${esc(url)}</div>
+    </div>
+    <div class="field">
+      <label>Restart command (run as Administrator)</label>
+      <div class="font-mono text-sm">${esc(restartCmd)}</div>
+    </div>
+    ${fp ? `
+    <div class="field">
+      <label>Certificate fingerprint</label>
+      <div class="font-mono text-sm">${esc(fp)}</div>
+    </div>` : ''}
+    <p class="setup-intro">
+      Your browser will warn that this certificate is self-signed — that's expected.
+      To clear the warning on client machines, import <span class="font-mono">certs\\server.crt</span>
+      into their Trusted Root Certification Authorities store.${fp ? ' Verify the fingerprint above matches after reconnecting.' : ''}
+    </p>
+  `;
+}
 
 document.getElementById('login-form').addEventListener('submit', async ev => {
   ev.preventDefault();

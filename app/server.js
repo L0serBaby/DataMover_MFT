@@ -89,6 +89,7 @@ auth.initAuth(app, { tlsEnabled, behindTlsProxy });
 // ── API routes ────────────────────────────────────────────────────────────────
 
 app.use('/api/auth',     require('./api/auth'));
+app.use('/api/setup',    require('./api/setup'));
 app.use('/api/ssh-keys', require('./api/ssh-keys'));
 app.use('/api/profiles', require('./api/profiles'));
 app.use('/api/rules',    require('./api/rules'));
@@ -201,6 +202,7 @@ function migratePgpKeys() {
 }
 
 migratePgpKeys();
+auth.ensureSetupCompletedForExistingInstall();
 
 scheduler.init();
 

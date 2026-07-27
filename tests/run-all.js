@@ -10,9 +10,11 @@ const FILES = [
   'crypto.test.js',
   'data.test.js',
   'auth.test.js',
+  'api-auth.test.js',
   'executor.test.js',
   'pgp.test.js',
   'scheduler.test.js',
+  'setup-tls.test.js',
 ];
 
 const results = FILES.map(file => {
