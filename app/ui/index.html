@@ -42,6 +42,47 @@
     </div>
   </div>
 
+  <!-- ═══ FORCED PASSWORD CHANGE ══════════════════════════════════════════ -->
+  <!-- Shown instead of the app shell whenever the logged-in user's record has
+       mustChangePassword set — no sidebar, no nav, no way to navigate around it. -->
+  <div id="setup-screen" class="login-screen hidden">
+    <div class="login-card">
+      <div class="login-brand">
+        <svg width="40" height="40" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="8" fill="#3b82f6"/>
+          <path d="M7 16h18M19 10l6 6-6 6" stroke="white" stroke-width="2.5"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div>
+          <div class="login-brand-name">DataMover</div>
+          <div class="login-brand-sub">Password change required</div>
+        </div>
+      </div>
+
+      <p class="setup-intro">
+        This account is still using its initial default password. Choose a new
+        password (at least 12 characters, and not the default) before continuing.
+      </p>
+
+      <form id="setup-form" novalidate>
+        <div class="field">
+          <label for="setup-password">New password</label>
+          <input id="setup-password" type="password"
+                 autocomplete="new-password" required>
+        </div>
+        <div class="field">
+          <label for="setup-password-confirm">Confirm new password</label>
+          <input id="setup-password-confirm" type="password"
+                 autocomplete="new-password" required>
+        </div>
+        <div id="setup-err" class="alert alert-error hidden"></div>
+        <button id="setup-btn" class="btn btn-primary w-full" type="submit">
+          Change password
+        </button>
+      </form>
+    </div>
+  </div>
+
   <!-- ═══ APP SHELL ════════════════════════════════════════════════════ -->
   <div id="app" class="app hidden">
 

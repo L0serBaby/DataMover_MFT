@@ -7,7 +7,7 @@ const path        = require('path');
 const cronParser  = require('cron-parser');
 const data        = require('../data');
 const scheduler   = require('../scheduler');
-const { requireAuth, requireAdmin } = require('../auth');
+const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
 const logger = require('../logger');
 
 // Must match SCHEDULE_TIMEZONE handling in scheduler.js — next-fire preview
@@ -24,6 +24,7 @@ function _getScheduleTimezone() {
 }
 
 router.use(requireAuth);
+router.use(requireSetupComplete);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

@@ -2,10 +2,11 @@
 
 const router   = require('express').Router();
 const sshKeys  = require('../ssh-keys');
-const { requireAuth, requireAdmin } = require('../auth');
+const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
 const logger   = require('../logger');
 
 router.use(requireAuth);
+router.use(requireSetupComplete);
 
 // GET /api/ssh-keys
 router.get('/', (req, res) => {

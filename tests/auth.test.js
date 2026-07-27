@@ -18,7 +18,10 @@ const tmpConfig = path.join(TMP, `dm_test_config_${crypto.randomBytes(4).toStrin
 fs.writeFileSync(tmpUsers,  '[]', 'utf8');
 fs.writeFileSync(tmpConfig, JSON.stringify({ SESSION_TIMEOUT_MINUTES: 15 }), 'utf8');
 
-const { login, logout, requireAuth, requireAdmin, _setFilePaths, _bootstrap } = require('../app/auth');
+const {
+  login, logout, requireAuth, requireAdmin, requireSetupComplete,
+  validateForcedPasswordChange, _setFilePaths, _bootstrap,
+} = require('../app/auth');
 _setFilePaths({ usersFile: tmpUsers, configFile: tmpConfig });
 
 function cleanup() {
@@ -100,6 +103,13 @@ function makeRes() {
     assert(users[0].passwordHash, 'passwordHash should be set');
     assert(users[0].createdAt,    'createdAt should be set');
     assert(!JSON.stringify(users[0]).includes('changeme123'), 'Raw password must not appear in users.json');
+  });
+
+  await test('bootstrap creates the admin with mustChangePassword: true', async () => {
+    fs.writeFileSync(tmpUsers, '[]', 'utf8');
+    await _bootstrap();
+    const users = readUsers();
+    assertEqual(users[0].mustChangePassword, true);
   });
 
   await test('bootstrap is idempotent — does not create a second user', async () => {
@@ -212,6 +222,86 @@ function makeRes() {
     const res = makeRes();
     requireAdmin(req, res, () => {});
     assertEqual(res._status, 401);
+  });
+
+  // ── mustChangePassword / forced setup ─────────────────────────────────────
+
+  await test('login treats an absent mustChangePassword field as false (pre-upgrade users)', async () => {
+    const hash = await bcrypt.hash('some-existing-password', 12);
+    writeUsers([{ id: 'legacy-1', username: 'legacy', passwordHash: hash, role: 'admin', createdAt: 'now' }]);
+    const user = await login('legacy', 'some-existing-password');
+    assertEqual(user.mustChangePassword, false);
+  });
+
+  await test('login remains reachable for a user with mustChangePassword set (allowlisted route)', async () => {
+    const hash = await bcrypt.hash('changeme123', 12);
+    writeUsers([{ id: 'forced-1', username: 'admin', passwordHash: hash, role: 'admin', createdAt: 'now', mustChangePassword: true }]);
+    const user = await login('admin', 'changeme123');
+    assertEqual(user.username, 'admin');
+    assertEqual(user.mustChangePassword, true);
+  });
+
+  await test('requireSetupComplete rejects a non-allowlisted route with 403 and the machine-readable body', () => {
+    writeUsers([{ id: 'forced-2', username: 'admin', passwordHash: 'h', role: 'admin', createdAt: 'now', mustChangePassword: true }]);
+    const req = { session: { user: { id: 'forced-2', username: 'admin', role: 'admin' } } };
+    const res = makeRes();
+    let called = false;
+    requireSetupComplete(req, res, () => { called = true; });
+    assert(!called, 'next() should not have been called');
+    assertEqual(res._status, 403);
+    assertEqual(res._body.error, 'Password change required');
+    assertEqual(res._body.mustChangePassword, true);
+  });
+
+  await test('requireSetupComplete lets a user with no pending change through', () => {
+    writeUsers([{ id: 'ok-1', username: 'admin', passwordHash: 'h', role: 'admin', createdAt: 'now' }]);
+    const req = { session: { user: { id: 'ok-1', username: 'admin', role: 'admin' } } };
+    const res = makeRes();
+    let called = false;
+    requireSetupComplete(req, res, () => { called = true; });
+    assert(called, 'next() should have been called');
+    assertEqual(res._status, null);
+  });
+
+  await test('validateForcedPasswordChange rejects the default password, case-insensitively', async () => {
+    const hash = await bcrypt.hash('changeme123', 12);
+    await assertRejects(() => validateForcedPasswordChange('CHANGEME123', hash), /must not be the default password/i);
+    await assertRejects(() => validateForcedPasswordChange('ChangeMe123', hash), /must not be the default password/i);
+  });
+
+  await test('validateForcedPasswordChange rejects the current password', async () => {
+    const hash = await bcrypt.hash('CorrectHorseBattery1', 12);
+    await assertRejects(() => validateForcedPasswordChange('CorrectHorseBattery1', hash), /must be different from the current password/i);
+  });
+
+  await test('validateForcedPasswordChange rejects passwords under 12 characters on this path', async () => {
+    const hash = await bcrypt.hash('changeme123', 12);
+    await assertRejects(() => validateForcedPasswordChange('Short1234', hash), /at least 12 characters/i);
+  });
+
+  await test('validateForcedPasswordChange accepts a sufficiently new, non-default password', async () => {
+    const hash = await bcrypt.hash('changeme123', 12);
+    await validateForcedPasswordChange('SomeNewLongEnoughPassword1', hash); // should not throw
+  });
+
+  await test('a successful change clears the flag, and the user can then reach a normal route', async () => {
+    const hash = await bcrypt.hash('changeme123', 12);
+    writeUsers([{ id: 'forced-3', username: 'admin', passwordHash: hash, role: 'admin', createdAt: 'now', mustChangePassword: true }]);
+
+    // Validate first, exactly like the route handler does before persisting.
+    await validateForcedPasswordChange('SomeNewLongEnoughPassword1', hash);
+
+    // Simulate what the route handler persists on success.
+    const users = readUsers();
+    delete users[0].mustChangePassword;
+    writeUsers(users);
+
+    const req = { session: { user: { id: 'forced-3', username: 'admin', role: 'admin' } } };
+    const res = makeRes();
+    let called = false;
+    requireSetupComplete(req, res, () => { called = true; });
+    assert(called, 'next() should have been called once the flag is cleared');
+    assertEqual(res._status, null);
   });
 
   // ── config ─────────────────────────────────────────────────────────────────

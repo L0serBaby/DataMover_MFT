@@ -3,9 +3,10 @@
 const router = require('express').Router();
 const crypto = require('crypto');
 const data   = require('../data');
-const { requireAuth, requireAdmin } = require('../auth');
+const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
 
 router.use(requireAuth);
+router.use(requireSetupComplete);
 
 // ── GET /api/groups ───────────────────────────────────────────────────────────
 router.get('/', (req, res) => {

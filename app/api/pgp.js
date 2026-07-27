@@ -6,10 +6,11 @@ const path   = require('path');
 const os     = require('os');
 const crypto = require('crypto');
 const pgp    = require('../pgp');
-const { requireAuth, requireAdmin } = require('../auth');
+const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
 const logger = require('../logger');
 
 router.use(requireAuth);
+router.use(requireSetupComplete);
 
 // ── GET /api/pgp — list all keys (armoredKey redacted) ────────────────────────
 router.get('/', (req, res) => {

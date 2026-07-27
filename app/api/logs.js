@@ -3,11 +3,12 @@
 const router = require('express').Router();
 const path   = require('path');
 const fs     = require('fs');
-const { requireAuth } = require('../auth');
+const { requireAuth, requireSetupComplete } = require('../auth');
 
 const LOG_DIR = path.join(__dirname, '../../logs');
 
 router.use(requireAuth);
+router.use(requireSetupComplete);
 
 // Returns the path of the most-recent dated log file, or null if none exist.
 function getCurrentLogFile() {

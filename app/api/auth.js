@@ -6,10 +6,11 @@ const bcrypt = require('bcryptjs');
 const fs     = require('fs');
 const path   = require('path');
 const auth   = require('../auth');
-const { requireAuth, requireAdmin } = auth;
+const { requireAuth, requireAdmin, requireSetupComplete } = auth;
 const logger = require('../logger');
 
-const USERS_FILE    = path.join(__dirname, '../../data/users.json');
+// Overridable via _setUsersFile() for testing — never call in production
+let _usersFile = path.join(__dirname, '../../data/users.json');
 const BCRYPT_ROUNDS = 12;
 
 // ── Login rate limiting ────────────────────────────────────────────────────────
@@ -57,14 +58,19 @@ function _rlMaybePrune() {
 }
 
 function loadUsers() {
-  try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); }
+  try { return JSON.parse(fs.readFileSync(_usersFile, 'utf8')); }
   catch { return []; }
 }
 
 function saveUsers(users) {
-  const tmp = USERS_FILE + '.tmp';
+  const tmp = _usersFile + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(users, null, 2), 'utf8');
-  fs.renameSync(tmp, USERS_FILE);
+  fs.renameSync(tmp, _usersFile);
+}
+
+// Test helper — never call in production code
+function _setUsersFile(file) {
+  _usersFile = file;
 }
 
 // POST /api/auth/login
@@ -91,7 +97,10 @@ router.post('/login', async (req, res) => {
     req.session.user = user;
     _rlClear(rlKey); // successful login clears the counter
     logger.info(`[auth] Login — user="${user.username}" ip=${req.socket?.remoteAddress || req.ip || 'unknown'}`);
-    res.json({ username: user.username, role: user.role });
+    // Full user object (id/mustChangePassword included) — enterApp() on the
+    // client needs mustChangePassword to decide whether to show the forced
+    // password screen or the app itself.
+    res.json({ ...user });
   } catch (err) {
     _rlRecord(rlKey); // count failed attempts
     logger.warn(`[auth] Login failed — ip=${req.socket?.remoteAddress || req.ip || 'unknown'}`);
@@ -120,14 +129,14 @@ router.get('/me', (req, res) => {
 // ── User management ───────────────────────────────────────────────────────────
 
 // GET /api/auth/users — admin only
-router.get('/users', requireAuth, requireAdmin, (req, res) => {
+router.get('/users', requireAuth, requireSetupComplete, requireAdmin, (req, res) => {
   const users = loadUsers().map(({ id, username, role, createdAt }) =>
     ({ id, username, role, createdAt }));
   res.json(users);
 });
 
 // POST /api/auth/users — create user (admin only)
-router.post('/users', requireAuth, requireAdmin, async (req, res) => {
+router.post('/users', requireAuth, requireSetupComplete, requireAdmin, async (req, res) => {
   try {
     const { username, password, role } = req.body || {};
     if (!username || typeof username !== 'string' || !username.trim())
@@ -165,6 +174,46 @@ router.put('/users/:id', requireAuth, async (req, res) => {
     const caller = req.session.user;
     const isAdmin = caller.role === 'admin';
 
+    const users        = loadUsers();
+    const callerRecord  = users.find(u => u.id === caller.id);
+    const forcedChange  = Boolean(callerRecord?.mustChangePassword);
+
+    // While a password change is outstanding, this route only accepts a
+    // self-service password change — no editing other users, no role changes.
+    if (forcedChange) {
+      if (caller.id !== id)
+        return res.status(403).json({ error: 'Password change required' });
+
+      const { password, role } = req.body || {};
+
+      if (role !== undefined)
+        return res.status(403).json({ error: 'Password change required' });
+
+      const idx = users.findIndex(u => u.id === id);
+      if (idx === -1) return res.status(404).json({ error: 'User not found' });
+
+      try {
+        await auth.validateForcedPasswordChange(password, users[idx].passwordHash);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+
+      users[idx].passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+      delete users[idx].mustChangePassword;
+      saveUsers(users);
+
+      // Regenerate session before re-attaching the user (C1 — session fixation)
+      await new Promise((resolve, reject) => {
+        req.session.regenerate(err => (err ? reject(err) : resolve()));
+      });
+      req.session.user = {
+        id: users[idx].id, username: users[idx].username, role: users[idx].role,
+        mustChangePassword: false,
+      };
+
+      return res.json({ id: users[idx].id, username: users[idx].username, role: users[idx].role });
+    }
+
     // Non-admins may only change their own password
     if (!isAdmin && caller.id !== id)
       return res.status(403).json({ error: 'Admin access required' });
@@ -181,8 +230,7 @@ router.put('/users/:id', requireAuth, async (req, res) => {
     if (password !== undefined && (typeof password !== 'string' || password.length < 8))
       return res.status(400).json({ error: 'password must be at least 8 characters' });
 
-    const users = loadUsers();
-    const idx   = users.findIndex(u => u.id === id);
+    const idx = users.findIndex(u => u.id === id);
     if (idx === -1) return res.status(404).json({ error: 'User not found' });
 
     if (password) {
@@ -210,7 +258,7 @@ router.put('/users/:id', requireAuth, async (req, res) => {
 });
 
 // DELETE /api/auth/users/:id — admin only; cannot delete self or last admin
-router.delete('/users/:id', requireAuth, requireAdmin, (req, res) => {
+router.delete('/users/:id', requireAuth, requireSetupComplete, requireAdmin, (req, res) => {
   try {
     const { id } = req.params;
     const caller = req.session.user;
@@ -234,5 +282,10 @@ router.delete('/users/:id', requireAuth, requireAdmin, (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Express routers are functions — attaching test helpers directly onto the
+// exported router is the standard way to reach into it without a parallel
+// export shape. Never call _setUsersFile in production code.
+router._setUsersFile = _setUsersFile;
 
 module.exports = router;

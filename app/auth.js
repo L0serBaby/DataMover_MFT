@@ -11,6 +11,8 @@ const logger = require('./logger');
 const DATA_DIR = path.join(__dirname, '../data');
 const BCRYPT_ROUNDS = 12;
 const DEFAULT_TIMEOUT_MINUTES = 30;
+const DEFAULT_PASSWORD = 'changeme123';
+const FORCED_CHANGE_MIN_LENGTH = 12;
 
 // Overridable via _setFilePaths() for testing
 let _usersFile = path.join(DATA_DIR, 'users.json');
@@ -55,6 +57,7 @@ async function bootstrap() {
     passwordHash: hash,
     role: 'admin',
     createdAt: new Date().toISOString(),
+    mustChangePassword: true,
   }]);
 
   // Log username only — never log the default password
@@ -101,7 +104,12 @@ async function login(username, password) {
 
   if (!user || !match) throw new Error('Invalid username or password');
 
-  return { id: user.id, username: user.username, role: user.role };
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    mustChangePassword: Boolean(user.mustChangePassword),
+  };
 }
 
 function logout(req) {
@@ -121,10 +129,52 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// Blocks every route except the login/logout/me/self-password-change allowlist
+// (enforced by callers choosing where to mount this) until a forced password
+// change is completed. Reads users.json fresh on every request rather than
+// req.session.user — the session is only updated once the change succeeds, so
+// trusting a session-cached copy of the flag would either miss a change made
+// by another route or, worse, go stale and lock the admin in the setup screen
+// even after they've already changed the password.
+function requireSetupComplete(req, res, next) {
+  const sessionUser = req.session?.user;
+  if (!sessionUser) return res.status(401).json({ error: 'Authentication required' });
+
+  const users = loadUsers();
+  const user = users.find(u => u.id === sessionUser.id);
+  if (user?.mustChangePassword) {
+    return res.status(403).json({ error: 'Password change required', mustChangePassword: true });
+  }
+  next();
+}
+
+// Password-policy check for the forced-change path (stricter than the
+// general 8-char floor). Throws a descriptive Error on rejection; otherwise
+// resolves. Kept separate from persistence so it stays testable without
+// touching users.json — app/api/auth.js owns loading/saving the record.
+async function validateForcedPasswordChange(newPassword, currentPasswordHash) {
+  // Checked before the length floor: "changeme123" is only 11 characters, so
+  // it would otherwise be rejected as "too short" — a misleading reason that
+  // could read as "just add one more character" instead of "this is banned".
+  if (typeof newPassword === 'string' && newPassword.toLowerCase() === DEFAULT_PASSWORD) {
+    throw new Error('New password must not be the default password');
+  }
+  if (typeof newPassword !== 'string' || newPassword.length < FORCED_CHANGE_MIN_LENGTH) {
+    throw new Error(`New password must be at least ${FORCED_CHANGE_MIN_LENGTH} characters`);
+  }
+  const matchesCurrent = await bcrypt.compare(newPassword, currentPasswordHash).catch(() => false);
+  if (matchesCurrent) {
+    throw new Error('New password must be different from the current password');
+  }
+}
+
 // Test helper — never call in production code
 function _setFilePaths({ usersFile, configFile } = {}) {
   if (usersFile !== undefined) _usersFile = usersFile;
   if (configFile !== undefined) _configFile = configFile;
 }
 
-module.exports = { initAuth, login, logout, requireAuth, requireAdmin, _setFilePaths, _bootstrap: bootstrap };
+module.exports = {
+  initAuth, login, logout, requireAuth, requireAdmin, requireSetupComplete,
+  validateForcedPasswordChange, _setFilePaths, _bootstrap: bootstrap,
+};

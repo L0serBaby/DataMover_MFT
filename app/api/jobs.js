@@ -3,9 +3,10 @@
 const router = require('express').Router();
 const data      = require('../data');
 const scheduler = require('../scheduler');
-const { requireAuth } = require('../auth');
+const { requireAuth, requireSetupComplete } = require('../auth');
 
 router.use(requireAuth);
+router.use(requireSetupComplete);
 
 // GET /api/jobs — paginated history
 router.get('/', (req, res) => {

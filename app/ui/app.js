@@ -199,6 +199,7 @@ function setOnline(online) {
 function showLogin(msg) {
   stopHeartbeat();
   document.getElementById('login-screen').classList.remove('hidden');
+  document.getElementById('setup-screen').classList.add('hidden');
   document.getElementById('app').classList.add('hidden');
   const errEl = document.getElementById('login-err');
   if (errEl) {
@@ -215,6 +216,74 @@ function hideLogin() {
   document.getElementById('login-screen').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
 }
+
+// Full-screen, non-dismissable password-change gate — shown instead of the
+// app shell whenever the logged-in user's record has mustChangePassword set.
+function showSetupScreen() {
+  stopHeartbeat();
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('app').classList.add('hidden');
+  document.getElementById('setup-screen').classList.remove('hidden');
+  requestAnimationFrame(() => {
+    const f = document.getElementById('setup-password');
+    if (f) f.focus();
+  });
+}
+
+function hideSetupScreen() {
+  document.getElementById('setup-screen').classList.add('hidden');
+}
+
+// Single decision point for "what to show once we know who's logged in" —
+// used after both login and the initial /api/auth/me check on page load, so
+// the two entry points can never disagree about whether setup is required.
+function enterApp() {
+  if (app.user?.mustChangePassword) {
+    showSetupScreen();
+  } else {
+    hideSetupScreen();
+    hideLogin();
+    bootApp();
+  }
+}
+
+document.getElementById('setup-form').addEventListener('submit', async ev => {
+  ev.preventDefault();
+
+  const password = document.getElementById('setup-password').value;
+  const confirm  = document.getElementById('setup-password-confirm').value;
+  const errEl    = document.getElementById('setup-err');
+  const btn      = document.getElementById('setup-btn');
+
+  errEl.classList.add('hidden');
+
+  if (password !== confirm) {
+    errEl.textContent = 'Passwords do not match';
+    errEl.classList.remove('hidden');
+    return;
+  }
+
+  btn.disabled    = true;
+  btn.textContent = 'Changing password…';
+
+  try {
+    await API.putJSON(`/api/auth/users/${encodeURIComponent(app.user.id)}`, { password });
+
+    document.getElementById('setup-password').value = '';
+    document.getElementById('setup-password-confirm').value = '';
+
+    const me = await API.getJSON('/api/auth/me');
+    if (!me) return; // session expired mid-flow — showLogin() already ran
+    app.user = me;
+    enterApp();
+  } catch (err) {
+    errEl.textContent = err.message || 'Password change failed';
+    errEl.classList.remove('hidden');
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = 'Change password';
+  }
+});
 
 document.getElementById('login-form').addEventListener('submit', async ev => {
   ev.preventDefault();
@@ -244,8 +313,7 @@ document.getElementById('login-form').addEventListener('submit', async ev => {
     }
 
     app.user = data;
-    hideLogin();
-    bootApp();
+    enterApp();
   } catch {
     errEl.textContent = 'Network error — server unreachable';
     errEl.classList.remove('hidden');
@@ -4382,8 +4450,7 @@ async function init() {
     const res = await fetch('/api/auth/me');
     if (res.ok) {
       app.user = await res.json();
-      hideLogin();
-      bootApp();
+      enterApp();
       return;
     }
   } catch { /* network error — show login */ }

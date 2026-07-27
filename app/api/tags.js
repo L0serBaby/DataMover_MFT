@@ -4,11 +4,12 @@ const router = require('express').Router();
 const path   = require('path');
 const fs     = require('fs');
 const data   = require('../data');
-const { requireAuth, requireAdmin } = require('../auth');
+const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
 
 const CONFIG_FILE = path.join(__dirname, '../../data/config.json');
 
 router.use(requireAuth);
+router.use(requireSetupComplete);
 
 // ── Config helpers ────────────────────────────────────────────────────────────
 

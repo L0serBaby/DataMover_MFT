@@ -103,6 +103,13 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   margin-top: 1px;
 }
 
+.setup-intro {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0 0 20px;
+}
+
 /* ── Form fields ─────────────────────────────────────────────────────────── */
 .field { margin-bottom: 18px; }
 

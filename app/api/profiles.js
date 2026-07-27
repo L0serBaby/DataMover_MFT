@@ -9,7 +9,7 @@ const Sftp   = require('ssh2-sftp-client');
 const { encrypt, decrypt } = require('../crypto');
 const data                 = require('../data');
 const sshKeys              = require('../ssh-keys');
-const { requireAuth, requireAdmin } = require('../auth');
+const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
 const logger               = require('../logger');
 
 const CRED_FILE = path.join(__dirname, '../../data/credentials.enc');
@@ -62,6 +62,7 @@ async function withSftp(profile, fn) {
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 router.use(requireAuth);
+router.use(requireSetupComplete);
 
 // GET /api/profiles
 router.get('/', (req, res) => {
