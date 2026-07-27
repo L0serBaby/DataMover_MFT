@@ -111,7 +111,11 @@ console.log('\nscheduler.js tests\n');
 // ── reloadAll ─────────────────────────────────────────────────────────────────
 
 await test('reloadAll registers cron for each enabled rule', async () => {
-  const rule = makeRule({ cron: '* * * * * *' });
+  // A once-a-year schedule, not '* * * * * *' — this test only checks
+  // registration, not firing, and an every-second cron races the assertion
+  // below against the next tick at a real second boundary (intermittently
+  // failing with "Expected 0, got 1" if the tick lands mid-test).
+  const rule = makeRule({ cron: '0 0 0 1 1 *' });
   await writeRules([rule]);
 
   scheduler.reloadAll();
