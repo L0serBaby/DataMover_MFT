@@ -20,7 +20,8 @@ for (const d of [SRC_DIR, DST1, DST2, DATA_DIR]) fs.mkdirSync(d, { recursive: tr
 
 // Set up data + executor AFTER creating dirs so _setDataDir sees them
 const { _setDataDir: setData } = require('../app/data');
-const { copyFile, moveFile, deleteFile, listFiles, transferRule, _setDataDir } = require('../app/executor');
+const { copyFile, moveFile, deleteFile, listFiles, transferRule, _setDataDir,
+        sanitizeRemoteName, assertWithin } = require('../app/executor');
 _setDataDir(DATA_DIR);  // points executor + data.js at DATA_DIR, cred file too
 
 function cleanup() {
@@ -476,6 +477,85 @@ await test('transferRule result has required jobResult fields', async () => {
   assert(typeof result.bytesTransferred === 'number', 'bytesTransferred should be a number');
   assert(Array.isArray(result.files),  'files should be an array');
   assert(Array.isArray(result.errors), 'errors should be an array');
+});
+
+// ── sanitizeRemoteName (C3) ───────────────────────────────────────────────────
+
+await test('sanitizeRemoteName rejects "../../evil"', async () => {
+  await assertRejects(async () => sanitizeRemoteName('../../evil'), /Rejected unsafe remote filename/);
+});
+
+await test('sanitizeRemoteName rejects "..\\\\..\\\\evil"', async () => {
+  await assertRejects(async () => sanitizeRemoteName('..\\..\\evil'), /Rejected unsafe remote filename/);
+});
+
+await test('sanitizeRemoteName rejects an absolute path', async () => {
+  await assertRejects(async () => sanitizeRemoteName('/etc/passwd'), /Rejected unsafe remote filename/);
+});
+
+await test('sanitizeRemoteName accepts a plain valid name', async () => {
+  assertEqual(sanitizeRemoteName('report.csv'), 'report.csv');
+});
+
+await test('sanitizeRemoteName accepts a name with spaces and unicode', async () => {
+  assertEqual(sanitizeRemoteName('Ünïcode report (2024).csv'), 'Ünïcode report (2024).csv');
+});
+
+await test('sanitizeRemoteName rejects "." and ".."', async () => {
+  await assertRejects(async () => sanitizeRemoteName('.'));
+  await assertRejects(async () => sanitizeRemoteName('..'));
+});
+
+await test('sanitizeRemoteName rejects empty and non-string input', async () => {
+  await assertRejects(async () => sanitizeRemoteName(''));
+  await assertRejects(async () => sanitizeRemoteName(undefined));
+});
+
+await test('sanitizeRemoteName rejects illegal Windows filename characters', async () => {
+  await assertRejects(async () => sanitizeRemoteName('bad:name.txt'));
+  await assertRejects(async () => sanitizeRemoteName('bad*name.txt'));
+});
+
+await test('sanitizeRemoteName rejects Windows reserved device names', async () => {
+  for (const name of ['NUL', 'CON', 'PRN', 'AUX', 'COM1', 'LPT1', 'NUL.txt', 'con.dat']) {
+    await assertRejects(async () => sanitizeRemoteName(name), /Rejected unsafe remote filename/);
+  }
+});
+
+await test('sanitizeRemoteName accepts names that merely start with a reserved stem', async () => {
+  assertEqual(sanitizeRemoteName('console.log'), 'console.log');
+  assertEqual(sanitizeRemoteName('communication.csv'), 'communication.csv');
+  assertEqual(sanitizeRemoteName('auxiliary.txt'), 'auxiliary.txt');
+});
+
+await test('sanitizeRemoteName rejects a trailing dot or trailing space', async () => {
+  await assertRejects(async () => sanitizeRemoteName('evil.txt.'), /Rejected unsafe remote filename/);
+  await assertRejects(async () => sanitizeRemoteName('evil.txt '), /Rejected unsafe remote filename/);
+});
+
+// ── assertWithin (C3) ─────────────────────────────────────────────────────────
+
+await test('assertWithin allows a path directly inside baseDir', async () => {
+  const base = path.join(ROOT, 'contain_ok');
+  const candidate = path.join(base, 'file.txt');
+  assertWithin(base, candidate); // should not throw
+});
+
+await test('assertWithin allows baseDir itself', async () => {
+  const base = path.join(ROOT, 'contain_self');
+  assertWithin(base, base); // should not throw
+});
+
+await test('assertWithin rejects a traversal that escapes baseDir', async () => {
+  const base = path.join(ROOT, 'contain_escape');
+  const candidate = path.join(base, '..', 'evil.txt');
+  await assertRejects(async () => assertWithin(base, candidate), /Path escapes base directory/);
+});
+
+await test('assertWithin rejects a sibling directory with a matching name prefix', async () => {
+  const base = path.join(ROOT, 'contain_base');
+  const sibling = path.join(ROOT, 'contain_base_evil', 'file.txt');
+  await assertRejects(async () => assertWithin(base, sibling), /Path escapes base directory/);
 });
 
 // ── Results ───────────────────────────────────────────────────────────────────

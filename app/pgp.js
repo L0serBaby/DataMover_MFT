@@ -280,6 +280,7 @@ function outputFilename(inputName, operation) {
  */
 async function transformFile(file, pgpConfig, tmpDir) {
   const { operation, decryptKeyId, encryptKeyIds, sign, signKeyId } = pgpConfig;
+  const { assertWithin } = require('./executor');
 
   let currentPath = file.path;
   let currentName = file.name;
@@ -287,6 +288,7 @@ async function transformFile(file, pgpConfig, tmpDir) {
   if (operation === 'decrypt' || operation === 'decrypt-then-encrypt') {
     const outName = outputFilename(currentName, 'decrypt');
     const outPath = path.join(tmpDir, outName);
+    assertWithin(tmpDir, outPath);
     await decryptFile(currentPath, outPath, decryptKeyId);
     currentPath = outPath;
     currentName = outName;
@@ -295,6 +297,7 @@ async function transformFile(file, pgpConfig, tmpDir) {
   if (operation === 'encrypt' || operation === 'decrypt-then-encrypt') {
     const outName = outputFilename(currentName, 'encrypt');
     const outPath = path.join(tmpDir, outName);
+    assertWithin(tmpDir, outPath);
     await encryptFile(currentPath, outPath, encryptKeyIds || [], { sign, signKeyId });
     // Clean up the intermediate plaintext from the decrypt step
     if (operation === 'decrypt-then-encrypt' && currentPath !== file.path) {

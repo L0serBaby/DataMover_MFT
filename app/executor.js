@@ -132,6 +132,63 @@ function resolveSftpDir(profile, rulePath) {
   return (rulePath || profile.remotePath || '/').replace(/\\/g, '/');
 }
 
+// ── Path containment ──────────────────────────────────────────────────────────
+
+const ILLEGAL_NAME_CHARS  = /[\\/:*?"<>|\0]/;
+const RESERVED_DEVICE_STEM = /^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])$/i;
+
+/**
+ * Validates a filename reported by a remote (SFTP) directory listing.
+ * Rejects rather than rewrites: basename() would silently truncate a
+ * traversal payload like "../../evil" down to "evil", masking the attempt
+ * instead of refusing it.
+ */
+function sanitizeRemoteName(rawName) {
+  if (typeof rawName !== 'string' || rawName.length === 0) {
+    throw new Error(`Rejected unsafe remote filename: ${JSON.stringify(rawName)}`);
+  }
+  const normalized = rawName.replace(/\\/g, '/');
+  const base       = path.posix.basename(normalized);
+  if (base !== normalized || base === '' || base === '.' || base === '..' ||
+      ILLEGAL_NAME_CHARS.test(base)) {
+    throw new Error(`Rejected unsafe remote filename: ${JSON.stringify(rawName)}`);
+  }
+  // Windows strips trailing dots/spaces during path normalization, so
+  // "evil.txt " would silently become "evil.txt" and could overwrite it.
+  if (/[. ]$/.test(base)) {
+    throw new Error(`Rejected unsafe remote filename: ${JSON.stringify(rawName)}`);
+  }
+  // Reserved device names resolve to devices in every directory on Windows —
+  // writing to NUL silently discards data, COM1/LPT1 can block on the handle.
+  const dotIdx = base.indexOf('.');
+  const stem   = dotIdx === -1 ? base : base.slice(0, dotIdx);
+  if (RESERVED_DEVICE_STEM.test(stem)) {
+    throw new Error(`Rejected unsafe remote filename: ${JSON.stringify(rawName)}`);
+  }
+  return base;
+}
+
+/**
+ * Asserts that candidatePath resolves to baseDir or a descendant of it.
+ * Case folding happens after resolve(), not before — resolving first
+ * normalizes ".." segments and separators, so folding the raw inputs could
+ * mask a traversal that only becomes case-identical once normalized.
+ */
+function assertWithin(baseDir, candidatePath) {
+  const resolvedBase = path.resolve(baseDir);
+  const resolvedPath = path.resolve(candidatePath);
+  let cmpBase = resolvedBase;
+  let cmpPath = resolvedPath;
+  if (process.platform === 'win32') {
+    cmpBase = cmpBase.toLowerCase();
+    cmpPath = cmpPath.toLowerCase();
+  }
+  if (cmpPath !== cmpBase && !cmpPath.startsWith(cmpBase + path.sep)) {
+    throw new Error(`Path escapes base directory: "${candidatePath}" is not within "${baseDir}"`);
+  }
+  return resolvedPath;
+}
+
 // ── Date part helper (shared by rename and zip bundle naming) ─────────────────
 
 function buildDatePart(format) {
@@ -312,15 +369,26 @@ async function getSftpClient(profile, pool) {
   return client;
 }
 
-async function sftpListFiles(client, remotePath, filter) {
+async function sftpListFiles(client, remotePath, filter, onReject) {
   let entries;
   try { entries = await client.list(remotePath); }
   catch { return []; }
   const base = remotePath.replace(/\/$/, '');
-  return entries
-    .filter(e => e.type === '-')
-    .filter(e => !filter || matchesGlob(e.name, filter))
-    .map(e => ({ name: e.name, path: `${base}/${e.name}`, relPath: e.name, size: e.size, mtime: e.modifyTime }));
+  const results = [];
+  for (const e of entries) {
+    if (e.type !== '-') continue;
+    let safeName;
+    try {
+      safeName = sanitizeRemoteName(e.name);
+    } catch (err) {
+      logger.warn(`[executor] Rejected unsafe filename from remote "${remotePath}": ${err.message}`);
+      if (onReject) onReject(e.name, remotePath, err);
+      continue;
+    }
+    if (filter && !matchesGlob(safeName, filter)) continue;
+    results.push({ name: safeName, path: `${base}/${safeName}`, relPath: safeName, size: e.size, mtime: e.modifyTime });
+  }
+  return results;
 }
 
 async function sftpGetFile(client, remotePath, localDest, expectedSize) {
@@ -436,10 +504,16 @@ async function transferRule(rule) {
     let sourceFiles;
     if (srcProfile.type === 'sftp') {
       const client = await getSftpClient(srcProfile, pool);
+      const sourceDir = resolveSftpDir(srcProfile, rule.source.path);
       sourceFiles  = await sftpListFiles(
         client,
-        resolveSftpDir(srcProfile, rule.source.path),
-        rule.source.filter
+        sourceDir,
+        rule.source.filter,
+        (rawName, remotePath, err) => {
+          jobResult.errors.push(
+            `Rejected unsafe filename "${rawName}" from remote "${remotePath}": ${err.message}`
+          );
+        }
       );
     } else {
       sourceFiles = await listLocalFiles(
@@ -580,6 +654,7 @@ async function transferRule(rule) {
           try {
             const client    = await getSftpClient(srcProfile, pool);
             const stagePath = path.join(workDir, `_dl_${file.name}`);
+            assertWithin(workDir, stagePath);
             await sftpGetFile(client, file.path, stagePath, file.size);
             stg     = { ...file, path: stagePath };
             isLocal = true;
@@ -673,6 +748,7 @@ async function transferRule(rule) {
           if (!isLocal) {
             const client    = await getSftpClient(srcProfile, pool);
             const stagePath = path.join(workDir, `_dl_${file.name}`);
+            assertWithin(workDir, stagePath);
             await sftpGetFile(client, file.path, stagePath, file.size);
             pgpInput = { ...file, path: stagePath };
             isLocal  = true;
@@ -712,6 +788,7 @@ async function transferRule(rule) {
           if (!isLocal) {
             const client    = await getSftpClient(srcProfile, pool);
             const stagePath = path.join(workDir, `_dl_zip_${file.name}`);
+            assertWithin(workDir, stagePath);
             await sftpGetFile(client, transferFile.path, stagePath, transferFile.size);
             transferFile = { ...transferFile, path: stagePath };
             isLocal      = true;
@@ -742,6 +819,7 @@ async function transferRule(rule) {
           if (!isLocal) {
             const client    = await getSftpClient(srcProfile, pool);
             const stagePath = path.join(workDir, `_dl_unzip_${file.name}`);
+            assertWithin(workDir, stagePath);
             await sftpGetFile(client, transferFile.path, stagePath, transferFile.size);
             transferFile = { ...transferFile, path: stagePath };
             isLocal      = true;
@@ -812,9 +890,14 @@ async function transferRule(rule) {
             destEntry.error  = `Destination profile not found: ${dest.profileId}`;
             allDestsOk = false;
           } else {
-            const destPath = ((srcProfile.type === 'local' || srcProfile.type === 'smb') && destProfile.type === 'sftp')
-              ? `${resolveSftpDir(destProfile, dest.path)}/${transferFile.name}`
-              : path.join(resolveLocalDir(destProfile, dest.path), transferFile.name);
+            let destPath;
+            if ((srcProfile.type === 'local' || srcProfile.type === 'smb') && destProfile.type === 'sftp') {
+              destPath = `${resolveSftpDir(destProfile, dest.path)}/${transferFile.name}`;
+            } else {
+              const localDestDir = resolveLocalDir(destProfile, dest.path);
+              destPath = path.join(localDestDir, transferFile.name);
+              assertWithin(localDestDir, destPath);
+            }
             destEntry.path = destPath;
 
             logger.info(`[transfer] "${rule.name}" | ${transferFile.name} (${transferFile.size}B) → ${destProfile.name}`);
@@ -904,4 +987,7 @@ function _setDataDir(dir) {
   _credFile = path.join(dir, 'credentials.enc');
 }
 
-module.exports = { copyFile, moveFile, deleteFile, listFiles, transferRule, _setDataDir };
+module.exports = {
+  copyFile, moveFile, deleteFile, listFiles, transferRule, _setDataDir,
+  sanitizeRemoteName, assertWithin,
+};
