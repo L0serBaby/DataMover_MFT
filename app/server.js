@@ -14,6 +14,66 @@ const scheduler = require('./scheduler');
 const DATA_DIR = path.join(__dirname, '../data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+const config = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'config.json'), 'utf8'));
+  } catch { return {}; }
+})();
+
+const ROOT_DIR = path.join(__dirname, '..');
+
+// ── TLS detection ─────────────────────────────────────────────────────────────
+// Resolved up front (before the session middleware is installed) because the
+// cookie's `secure` flag must be derived from the same TLS state that decides
+// whether the server below listens over http or https — never computed twice.
+
+function resolveTlsOptions(cfg, rootDir) {
+  // PFX / PKCS#12 — takes priority over PEM cert+key
+  if (cfg.SSL_PFX) {
+    const pfxPath = path.resolve(rootDir, cfg.SSL_PFX);
+    if (fs.existsSync(pfxPath)) {
+      const opts = { pfx: fs.readFileSync(pfxPath) };
+      if (cfg.SSL_PFX_PASS) opts.passphrase = cfg.SSL_PFX_PASS;
+      return opts;
+    }
+    logger.warn(`SSL_PFX file not found (${pfxPath}) — checking for PEM cert/key`);
+  }
+
+  // PEM cert + key
+  const certPath = path.resolve(rootDir, cfg.SSL_CERT || 'certs/server.crt');
+  const keyPath  = path.resolve(rootDir, cfg.SSL_KEY  || 'certs/server.key');
+  if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+    return { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
+  }
+
+  if (cfg.SSL_CERT || cfg.SSL_KEY) {
+    logger.warn(`SSL cert/key not found (cert=${certPath}, key=${keyPath}) — falling back to HTTP`);
+  }
+  return null;
+}
+
+const tlsOpts       = resolveTlsOptions(config, ROOT_DIR);
+const hasLocalTls   = Boolean(tlsOpts);
+const behindTlsProxy = config.BEHIND_TLS_PROXY === true;
+const tlsEnabled    = hasLocalTls || behindTlsProxy;
+
+if (hasLocalTls) {
+  logger.info('Session cookie secure=true (local TLS)');
+} else if (behindTlsProxy) {
+  logger.warn(
+    'Session cookie secure=true (BEHIND_TLS_PROXY) — this host is serving plain HTTP locally. ' +
+    'Verify a reverse proxy is ACTUALLY terminating TLS and forwarding X-Forwarded-Proto before ' +
+    'relying on this. If no proxy is terminating TLS, the browser will never send the cookie back ' +
+    'and NO ONE will be able to log in until config.json BEHIND_TLS_PROXY is reverted to false.'
+  );
+} else {
+  logger.error(
+    'Session cookie secure=false (plaintext HTTP) — credentials and session cookies are being ' +
+    'transmitted in cleartext. Configure SSL_CERT/SSL_KEY or SSL_PFX, or set BEHIND_TLS_PROXY ' +
+    'if TLS is terminated by a reverse proxy.'
+  );
+}
+
 // ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();
@@ -21,8 +81,10 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
+if (behindTlsProxy) app.set('trust proxy', 1);
+
 // Session + auth middleware
-auth.initAuth(app);
+auth.initAuth(app, { tlsEnabled, behindTlsProxy });
 
 // ── API routes ────────────────────────────────────────────────────────────────
 
@@ -52,46 +114,16 @@ app.get('*', (req, res, next) => {
 
 // ── Start server ──────────────────────────────────────────────────────────────
 
-const config = (() => {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'config.json'), 'utf8'));
-  } catch { return {}; }
-})();
-
-const PORT     = config.PORT || process.env.PORT || 3000;
-const ROOT_DIR = path.join(__dirname, '..');
+const PORT = config.PORT || process.env.PORT || 3000;
 
 let server;
 let protocol;
 
-const _tlsOpts = (() => {
-  // PFX / PKCS#12 — takes priority over PEM cert+key
-  if (config.SSL_PFX) {
-    const pfxPath = path.resolve(ROOT_DIR, config.SSL_PFX);
-    if (fs.existsSync(pfxPath)) {
-      const opts = { pfx: fs.readFileSync(pfxPath) };
-      if (config.SSL_PFX_PASS) opts.passphrase = config.SSL_PFX_PASS;
-      return opts;
-    }
-    logger.warn(`SSL_PFX file not found (${pfxPath}) — checking for PEM cert/key`);
-  }
-
-  // PEM cert + key
-  const certPath = path.resolve(ROOT_DIR, config.SSL_CERT || 'certs/server.crt');
-  const keyPath  = path.resolve(ROOT_DIR, config.SSL_KEY  || 'certs/server.key');
-  if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
-    return { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
-  }
-
-  if (config.SSL_CERT || config.SSL_KEY) {
-    logger.warn(`SSL cert/key not found (cert=${certPath}, key=${keyPath}) — falling back to HTTP`);
-  }
-  return null;
-})();
-
-if (_tlsOpts) {
+// Same `tlsOpts` value used above to derive the cookie's secure flag — the
+// listener type and the cookie state can never disagree on local-TLS status.
+if (tlsOpts) {
   const https = require('https');
-  server   = https.createServer(_tlsOpts, app);
+  server   = https.createServer(tlsOpts, app);
   protocol = 'https';
 } else {
   const http = require('http');

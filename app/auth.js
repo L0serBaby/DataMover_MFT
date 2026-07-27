@@ -61,18 +61,21 @@ async function bootstrap() {
   logger.warn('[auth] Default admin user created (username: admin) — change the password immediately via Settings');
 }
 
-function initAuth(app) {
+function initAuth(app, { tlsEnabled = false, behindTlsProxy = false } = {}) {
   const config = loadConfig();
   const timeoutMinutes = config.SESSION_TIMEOUT_MINUTES ?? DEFAULT_TIMEOUT_MINUTES;
   const secret = deriveSessionSecret();
 
   app.use(session({
     secret,
+    name: 'datamover.sid', // don't advertise express-session
     resave: false,
     saveUninitialized: false,
+    proxy: behindTlsProxy, // only honour X-Forwarded-Proto when a proxy is actually trusted
     cookie: {
       httpOnly: true,
       sameSite: 'strict',
+      secure: tlsEnabled,
       maxAge: timeoutMinutes * 60 * 1000,
     },
   }));

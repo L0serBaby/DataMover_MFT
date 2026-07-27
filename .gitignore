@@ -30,3 +30,10 @@ node_modules/
 .DS_Store
 Thumbs.db
 *.tmp
+*.code-workspace
+
+# Internal security working notes — these describe UNPATCHED vulnerabilities in
+# actionable detail. Do not commit to a repo with a public remote while any
+# finding remains open. Revisit once C2 (credential store re-key) has shipped.
+SECURITY_REVIEW.md
+CC_SECURITY_FIX_PROMPTS.md
