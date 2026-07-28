@@ -15,6 +15,7 @@ const FILES = [
   'pgp.test.js',
   'scheduler.test.js',
   'setup-tls.test.js',
+  'migrate-credentials.test.js',
 ];
 
 const results = FILES.map(file => {

@@ -57,6 +57,7 @@ All configuration lives in `data\config.json`, editable via the Settings page in
 - `SSL_CERT` / `SSL_KEY` — PEM certificate + key (defaults to `certs\server.crt` / `certs\server.key`)
 - `BEHIND_TLS_PROXY` — set `true` when a reverse proxy (IIS, nginx) terminates TLS in front of DataMover; forces the session cookie's `secure` flag on and trusts `X-Forwarded-Proto` even though DataMover itself is serving plain HTTP locally. **Only set this if a proxy is actually terminating TLS and forwarding that header** — otherwise the browser never sends the session cookie back and no one can log in until the flag is reverted and the service restarted.
 - `SETUP_COMPLETED_AT` — ISO timestamp written automatically once the first-run password-change + TLS/port wizard finishes; not meant to be edited by hand
+- `MASTER_KEY_PATH` — relocates the master key (default `data\master.key`) to a different path, e.g. a separate drive. Only takes effect for a key that doesn't exist yet — moving an existing key requires moving the file yourself and updating this to match.
 - `SESSION_TIMEOUT_MINUTES` — UI session length (takes effect after a service restart)
 - `LOG_RETENTION_DAYS` — how long rotated logs are kept
 - `SCHEDULE_TIMEZONE` — IANA timezone (e.g. `America/Phoenix`) used to interpret rule schedules; defaults to the server OS's local timezone if unset
@@ -78,6 +79,39 @@ Because `PORT` and the TLS certificate are read once at process startup, a bad v
 5. Save the file and start the service again: `net start DataMover`
 
 This is the only way back in if a certificate doesn't parse, a key doesn't load, or a port can't be bound — editing `config.json` by hand and restarting.
+
+## Credential encryption
+
+Every stored credential (SFTP passwords, SSH private keys, PGP private keys/passphrases) and the session-signing secret are derived from a random 32-byte master key at `data\master.key`, generated automatically on first run. Two independent keys are derived from it via HKDF — one for credential encryption, one for session signing — so a leak of one does not expose the other. Each encrypted value carries its own random salt in addition to its IV, so no two values ever share key material even though they share the same master key.
+
+**Upgrading from a pre-master-key install**: the first startup after upgrading re-encrypts `data\credentials.enc` automatically (see "Migration" below). This also changes the session-signing secret, so **every active session is invalidated and everyone has to log in again once** — this is expected, not a bug.
+
+### Migration (automatic, one-time)
+
+On every startup, DataMover checks `data\credentials.enc`: if it's still in the old (pre-master-key) format, it is re-encrypted to the current format before anything else runs. This is safe to interrupt and safe to leave alone:
+
+- A timestamped backup (`credentials.enc.bak-<ISO timestamp>`) is written **before** anything else happens
+- The new version is verified — every credential value is decrypted back out of the new file and compared against the original — **before** it replaces the live file
+- If the store is already current, nothing happens (no backup, no rewrite, no old-format key material touched)
+- If anything fails at any point, `credentials.enc` is left exactly as it was and the failure is logged at error level; the next restart retries from scratch
+
+### Rolling back
+
+If something goes wrong after upgrading to master-key-based encryption:
+
+1. Stop the service: `net stop DataMover`
+2. In `data\`, find the backup created at migration time: `credentials.enc.bak-<ISO timestamp>`. Copy it back over `data\credentials.enc` to restore the pre-migration store.
+3. If you're also rolling back the *code* to a pre-master-key release: the old code only understands the old format, so restoring the `.bak` (which is in that old format) is what makes that old code work again. Do not restore a `.bak` that was itself already in the new format (i.e. taken after a *second* successful migration) if you're rolling back code that predates master keys entirely.
+4. Start the service: `net start DataMover`
+5. Everyone logs in again once — expected, the session secret just changed (again).
+
+`data\master.key` itself is never touched by rollback — leave it in place. If you deleted or lost it, any credential already re-encrypted under it is unrecoverable (see below); restoring `credentials.enc.bak-*` only helps if that backup predates the key you lost.
+
+### What this does and does not protect against
+
+**Protects against** the original finding: a stolen copy of the source code plus a single local registry read no longer being sufficient to decrypt `credentials.enc` or forge a session cookie. The salt and derivation are no longer public, guessable, or identical across every installation.
+
+**Does not protect against** an attacker who can read `data\master.key` alongside `data\credentials.enc` — filesystem access to the data directory (a full backup, a compromised service account, disk theft) still yields everything, same as before. The key is stored beside the data it protects; that is a deliberate simplicity trade-off, not an oversight, and it means this change raises the bar from "public information" to "requires access to this specific host's data directory" — it does not raise it to "requires a hardware security module or remote key vault." If that stronger guarantee is ever needed, it requires a genuinely separate key-storage mechanism (HSM, cloud KMS, a secrets manager) — out of scope here.
 
 ## Data & Logs
 

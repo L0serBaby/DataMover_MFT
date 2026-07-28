@@ -24,6 +24,14 @@ const { copyFile, moveFile, deleteFile, listFiles, transferRule, _setDataDir,
         sanitizeRemoteName, assertWithin } = require('../app/executor');
 _setDataDir(DATA_DIR);  // points executor + data.js at DATA_DIR, cred file too
 
+// executor.js's credential resolution goes through app/crypto.js's decrypt(),
+// which resolves its own master.key and credentials.enc paths independent of
+// DATA_DIR above — redirect both (the latter matches executor.js's own
+// _credFile) so this suite never touches real data/ files.
+const appCrypto = require('../app/crypto');
+appCrypto._setMasterKeyPath(path.join(DATA_DIR, 'master.key'));
+appCrypto._setCredentialsFilePath(path.join(DATA_DIR, 'credentials.enc'));
+
 function cleanup() {
   fs.rmSync(ROOT, { recursive: true, force: true });
 }

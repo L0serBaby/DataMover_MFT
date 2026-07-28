@@ -23,6 +23,14 @@ for (const d of [DATA_DIR, WORK_DIR]) fs.mkdirSync(d, { recursive: true });
 const pgp = require('../app/pgp');
 pgp._setDataDir(DATA_DIR);
 
+// pgp.js's credential store goes through app/crypto.js's encrypt/decrypt,
+// which — independent of DATA_DIR above — resolves its own master.key and
+// credentials.enc paths. Redirect both (the latter matches pgp.js's own
+// _credFile above) or this suite would create/read real data/ files.
+const appCrypto = require('../app/crypto');
+appCrypto._setMasterKeyPath(path.join(DATA_DIR, 'master.key'));
+appCrypto._setCredentialsFilePath(path.join(DATA_DIR, 'credentials.enc'));
+
 function cleanup() {
   fs.rmSync(ROOT, { recursive: true, force: true });
 }

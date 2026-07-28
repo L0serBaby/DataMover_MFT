@@ -9,6 +9,7 @@ const logger  = require('./logger');
 
 const auth      = require('./auth');
 const scheduler = require('./scheduler');
+const { migrateCredentialStore } = require('./migrate-credentials');
 
 // Ensure data dir exists
 const DATA_DIR = path.join(__dirname, '../data');
@@ -200,6 +201,12 @@ function migratePgpKeys() {
 
   logger.info(`[pgp-migrate] Migration complete — ${migrated} key(s) migrated`);
 }
+
+// Runs before migratePgpKeys so a legacy v1 credentials.enc is moved to the
+// current v2 format under this migration's explicit backup+verify safety
+// net, rather than being silently re-encrypted as a side effect of
+// pgp-migrate (which also calls encrypt()/decrypt() against the same file).
+migrateCredentialStore({ credFile: path.join(DATA_DIR, 'credentials.enc') });
 
 migratePgpKeys();
 auth.ensureSetupCompletedForExistingInstall();
