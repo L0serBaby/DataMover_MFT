@@ -28,18 +28,23 @@ const ICON = {
   copy:       `<svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M4.5 13H4a1.5 1.5 0 01-1.5-1.5V4A1.5 1.5 0 014 2.5h7.5A1.5 1.5 0 0113 4v.5"/></svg>`,
   check:      `<svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10l4 4 8-8"/></svg>`,
 };
+ICON['gs-logs'] = ICON.file;
 
 // ════════════════════════════════════════════════════════════════════════
 //  NAV CONFIGURATION
 // ════════════════════════════════════════════════════════════════════════
 
+// `feature` items are optional, off by default — they only appear once
+// enabled in Settings → Features (see buildNav / app.features).
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'rules',     label: 'Rules' },
   { id: 'profiles',  label: 'Profiles' },
   { id: 'history',   label: 'History' },
   { id: 'logs',      label: 'Logs' },
+  { id: 'gs-logs',   label: 'GS Logs',  feature: 'gsLogsBrowser' },
   { id: 'settings',  label: 'Settings' },
+  { id: 'import',    label: 'Import',   href: '/import.html', feature: 'ruleImport' },
 ];
 
 const VIEW_TITLES = {
@@ -48,6 +53,7 @@ const VIEW_TITLES = {
   profiles:  'Profiles',
   history:   'History',
   logs:      'Logs',
+  'gs-logs': 'GS Logs',
   settings:       'Settings',
   'rule-builder': 'Rule Builder',
 };
@@ -546,30 +552,38 @@ document.getElementById('login-form').addEventListener('submit', async ev => {
 //  APP BOOT
 // ════════════════════════════════════════════════════════════════════════
 
-function bootApp() {
+async function bootApp() {
+  // Fetch settings (session timeout + feature flags) before building nav —
+  // buildNav() needs app.features to know whether to show gated items like
+  // GS Logs / Import.
+  let cfg = null;
+  try {
+    const r = await fetch('/api/settings');
+    cfg = r.ok ? await r.json() : null;
+  } catch { /* fall through with cfg = null; features default to hidden */ }
+
+  app.features = cfg?.features || {};
+  if (cfg?.sessionTimeoutMinutes) app.sessionTimeoutMs = cfg.sessionTimeoutMinutes * 60_000;
+
   buildNav();
   updateUserDisplay();
   routeFromHash();
-  // Fetch session timeout, then arm the heartbeat
-  fetch('/api/settings')
-    .then(r => r.ok ? r.json() : null)
-    .then(cfg => {
-      if (cfg?.sessionTimeoutMinutes) app.sessionTimeoutMs = cfg.sessionTimeoutMinutes * 60_000;
-    })
-    .catch(() => {})
-    .finally(() => { resetExpiry(); startHeartbeat(); });
+  resetExpiry();
+  startHeartbeat();
 }
 
 function buildNav() {
-  document.getElementById('sidebar-nav').innerHTML = NAV_ITEMS.map(n => {
-    const href = n.href ? n.href : `#${n.id}`;
-    const extra = n.href ? 'target="_blank" rel="noopener"' : `data-view="${n.id}"`;
-    return `
-      <a href="${href}" class="nav-item" ${extra}>
-        <span class="nav-icon">${ICON[n.id]}</span>
-        <span class="nav-label">${n.label}</span>
-      </a>`;
-  }).join('');
+  document.getElementById('sidebar-nav').innerHTML = NAV_ITEMS
+    .filter(n => !n.feature || app.features?.[n.feature])
+    .map(n => {
+      const href = n.href ? n.href : `#${n.id}`;
+      const extra = n.href ? 'target="_blank" rel="noopener"' : `data-view="${n.id}"`;
+      return `
+        <a href="${href}" class="nav-item" ${extra}>
+          <span class="nav-icon">${ICON[n.id]}</span>
+          <span class="nav-label">${n.label}</span>
+        </a>`;
+    }).join('');
 }
 
 function updateUserDisplay() {
@@ -2252,6 +2266,528 @@ VIEWS.logs = function(el) {
   return () => clearInterval(timer);
 };
 
+// ── GS Logs ───────────────────────────────────────────────────────────
+VIEWS['gs-logs'] = function(el) {
+  // Optional feature — off by default. The nav item is already hidden when
+  // disabled, but this guards direct navigation to #gs-logs too.
+  if (!app.features?.gsLogsBrowser) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <h3>GS Logs Browser is disabled</h3>
+        <p>Enable it in <a href="#settings?tab=features">Settings → Features</a> to browse GlobalScape log records.</p>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = '<div class="loading-center"><div class="spinner"></div></div>';
+
+  let allRecords      = [];
+  let filteredRecords = [];
+  let currentPage     = 1;
+  const PAGE_SIZE      = 100;
+  let sortField        = 'timestamp';
+  let sortDir          = 'desc';
+  let qfSet            = new Set();
+  let profiles         = [];
+  let srcProfileId     = '';
+  let srcPath          = '';
+  let loadError        = null;
+
+  const COLS = [
+    { id: 'timestamp', label: 'Timestamp',    w: 170, vis: true  },
+    { id: 'server',    label: 'Server',       w: 90,  vis: true  },
+    { id: 'protocol',  label: 'Protocol',     w: 80,  vis: true  },
+    { id: 'host',      label: 'Host',         w: 180, vis: false },
+    { id: 'user',      label: 'User',         w: 110, vis: false },
+    { id: 'action',    label: 'Action',       w: 85,  vis: true  },
+    { id: 'partner',   label: 'Partner',      w: 140, vis: true  },
+    { id: 'filename',  label: 'Filename',     w: 260, vis: true  },
+    { id: 'source',    label: 'Source Path',  w: 340, vis: true  },
+    { id: 'dest',      label: 'Dest Path',    w: 340, vis: true  },
+    { id: 'size',      label: 'Size',         w: 80,  vis: true  },
+  ];
+
+  function escRx(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  function dash()    { return '<span class="text-muted">—</span>'; }
+
+  // ── Data loading ──────────────────────────────────────────────────
+  async function loadSettingsAndProfiles() {
+    const [rs, rp] = await Promise.all([API.get('/api/settings'), API.get('/api/profiles')]);
+    if (!rs || !rp) return;
+    const settings     = await rs.json();
+    const allProfiles  = await rp.json();
+    profiles     = allProfiles.filter(p => p.type !== 'sftp');
+    srcProfileId = settings.gsLogsProfileId || '';
+    srcPath      = settings.gsLogsPath || '';
+  }
+
+  async function loadRecords() {
+    loadError = null;
+    allRecords = [];
+    try {
+      const res = await API.get('/api/gs-logs');
+      if (!res) return;
+      const body = await res.json();
+      if (!res.ok) { loadError = body.error || 'Failed to load GS logs.'; return; }
+      allRecords = body.records || [];
+    } catch (err) {
+      loadError = err.message;
+    }
+  }
+
+  async function loadAll() {
+    try {
+      await loadSettingsAndProfiles();
+      await loadRecords();
+    } catch (err) {
+      loadError = err.message;
+    }
+    renderFull();
+  }
+
+  // ── Render shell ──────────────────────────────────────────────────
+  function renderFull() {
+    const pOpts = profiles.map(p =>
+      `<option value="${esc(p.id)}"${p.id===srcProfileId?' selected':''}>${esc(p.name)} (${esc(p.type)})</option>`).join('');
+
+    const hasData = !loadError && allRecords.length > 0;
+
+    el.innerHTML = `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header">
+          <span class="card-title">Source Folder</span>
+          <button id="gsl-refresh" class="btn btn-ghost btn-sm">${ICON.refresh} Refresh</button>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label>Profile</label>
+            <select id="gsl-src-profile">
+              <option value="">— select profile —</option>${pOpts}
+            </select>
+          </div>
+          <div class="field">
+            <label>Path</label>
+            <div class="path-row">
+              <input id="gsl-src-path" type="text" placeholder="\\\\server\\share\\gs-logs" value="${esc(srcPath)}">
+              <button id="gsl-browse" class="btn btn-secondary btn-sm" title="Browse">${ICON.folder}</button>
+            </div>
+          </div>
+        </div>
+        <button id="gsl-save" class="btn btn-primary btn-sm">Save</button>
+        <span id="gsl-save-msg" class="text-muted text-sm" style="margin-left:10px"></span>
+      </div>
+
+      ${loadError ? `
+        <div class="empty-state">
+          <h3>GS Logs not available</h3>
+          <p>${esc(loadError)}</p>
+        </div>` : ''}
+
+      ${!loadError && !hasData ? `
+        <div class="empty-state">
+          <h3>No log records found</h3>
+          <p>The configured folder has no parsable .log/.txt/.csv files yet.</p>
+        </div>` : ''}
+
+      ${!loadError && hasData ? `
+        <div class="history-filter-bar" id="gsl-filter-bar">
+          <input id="gsl-search" type="text" placeholder="Search filename, path, partner, host…" style="min-width:220px">
+          <select id="gsl-partner"><option value="">All Partners</option></select>
+          <select id="gsl-action">
+            <option value="">All Actions</option>
+            <option value="download">Download</option>
+            <option value="list">List</option>
+            <option value="upload">Upload</option>
+          </select>
+          <select id="gsl-protocol">
+            <option value="">All Protocols</option>
+            <option value="local">Local</option>
+            <option value="sftp">SFTP</option>
+          </select>
+          <select id="gsl-server"><option value="">All Servers</option></select>
+          <input id="gsl-date-from" type="date" title="Date from">
+          <input id="gsl-date-to"   type="date" title="Date to">
+          <button id="gsl-reset" class="btn btn-ghost btn-sm">✕ Reset</button>
+        </div>
+
+        <div class="history-filter-bar" id="gsl-quick-bar">
+          <span class="text-muted text-sm">Quick:</span>
+          <button class="filter-chip" data-qf="hide-list">Hide list actions</button>
+          <button class="filter-chip" data-qf="files-only">Files only</button>
+          <button class="filter-chip" data-qf="uploads-only">Uploads only</button>
+          <button class="filter-chip" data-qf="downloads-only">Downloads only</button>
+          <span class="text-muted text-sm" id="gsl-stats" style="margin-left:auto"></span>
+        </div>
+
+        <div class="history-filter-bar" id="gsl-toolbar">
+          <button id="gsl-export" class="btn btn-ghost btn-sm">⬇ Export CSV</button>
+          <button id="gsl-copy"   class="btn btn-ghost btn-sm">📋 Copy</button>
+          <div class="gsl-col-toggle-wrap" style="margin-left:auto;position:relative">
+            <button id="gsl-col-toggle" class="btn btn-ghost btn-sm">⚙ Columns</button>
+            <div class="gsl-col-panel" id="gsl-col-panel"></div>
+          </div>
+        </div>
+
+        <div class="table-info" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div class="text-muted text-sm" id="gsl-result-count"></div>
+          <div class="history-pagination" id="gsl-pagination" style="margin-top:0"></div>
+        </div>
+        <div class="card" style="padding:0;overflow:hidden">
+          <div class="table-wrap" id="gsl-table-wrap">
+            <table>
+              <thead><tr id="gsl-header-row"></tr></thead>
+              <tbody id="gsl-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="history-pagination" id="gsl-pagination-bottom"></div>
+      ` : ''}
+    `;
+
+    wireEvents();
+
+    if (!loadError) {
+      populateDD();
+      buildColPanel();
+      renderHeaders();
+      applyFilters();
+    }
+  }
+
+  // ── Dropdowns ───────────────────────────────────────────────────────
+  function populateDD() {
+    const cmp = (a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' });
+    const partners = [...new Set(allRecords.map(r => r.partner).filter(Boolean))].sort(cmp);
+    const servers  = [...new Set(allRecords.map(r => r.server))].sort(cmp);
+    const pEl = document.getElementById('gsl-partner');
+    const sEl = document.getElementById('gsl-server');
+    if (pEl) pEl.innerHTML = '<option value="">All Partners</option>' + partners.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+    if (sEl) sEl.innerHTML = '<option value="">All Servers</option>'  + servers.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+
+    const stats = document.getElementById('gsl-stats');
+    if (stats) {
+      const files = new Set(allRecords.filter(r => r.action !== 'list').map(r => r.filename).filter(Boolean));
+      stats.textContent = `${allRecords.length.toLocaleString()} records · ${files.size.toLocaleString()} files · ${partners.length.toLocaleString()} partners · ${servers.length.toLocaleString()} servers`;
+    }
+  }
+
+  // ── Column panel + resize ────────────────────────────────────────────
+  function buildColPanel() {
+    const panel = document.getElementById('gsl-col-panel');
+    if (!panel) return;
+    panel.innerHTML = '<div class="gsl-col-panel-title">Show / Hide Columns</div>' +
+      COLS.map(c => `<label><input type="checkbox" data-col="${esc(c.id)}" ${c.vis ? 'checked' : ''}> ${esc(c.label)}</label>`).join('');
+    panel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const col = COLS.find(c => c.id === cb.dataset.col);
+        if (col) col.vis = cb.checked;
+        renderHeaders();
+        renderTable();
+      });
+    });
+  }
+
+  function toggleColPanel() { document.getElementById('gsl-col-panel')?.classList.toggle('open'); }
+
+  function closeColPanelOnOutsideClick(e) {
+    const w = el.querySelector('.gsl-col-toggle-wrap');
+    if (w && !w.contains(e.target)) document.getElementById('gsl-col-panel')?.classList.remove('open');
+  }
+
+  function renderHeaders() {
+    const row = document.getElementById('gsl-header-row');
+    if (!row) return;
+    row.innerHTML = '';
+    for (const c of COLS) {
+      if (!c.vis) continue;
+      const th = document.createElement('th');
+      th.style.width = c.w + 'px';
+      th.style.minWidth = '50px';
+      th.style.cursor = 'pointer';
+      th.style.position = 'relative';
+      th.style.userSelect = 'none';
+      th.className = sortField === c.id ? 'gsl-sorted' : '';
+      th.innerHTML = `${esc(c.label)} <span class="gsl-sort-arrow">${sortField === c.id ? (sortDir === 'asc' ? '▲' : '▼') : ''}</span>`;
+      th.addEventListener('click', () => sortBy(c.id));
+      const h = document.createElement('div');
+      h.className = 'gsl-resize-handle';
+      h.addEventListener('mousedown', e => startResize(e, c, th));
+      th.appendChild(h);
+      row.appendChild(th);
+    }
+  }
+
+  let _rs = null;
+  function startResize(e, col, th) {
+    e.preventDefault(); e.stopPropagation();
+    e.target.classList.add('resizing');
+    _rs = { col, th, x0: e.clientX, w0: th.offsetWidth, h: e.target };
+    document.addEventListener('mousemove', onResize);
+    document.addEventListener('mouseup', stopResize);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+  function onResize(e) {
+    if (!_rs) return;
+    const nw = Math.max(50, _rs.w0 + (e.clientX - _rs.x0));
+    _rs.th.style.width = nw + 'px';
+    _rs.col.w = nw;
+    const idx = Array.from(_rs.th.parentNode.children).indexOf(_rs.th);
+    document.querySelectorAll('#gsl-table-body tr').forEach(tr => {
+      const td = tr.children[idx];
+      if (td) td.style.width = nw + 'px';
+    });
+  }
+  function stopResize() {
+    if (_rs) { _rs.h.classList.remove('resizing'); _rs = null; }
+    document.removeEventListener('mousemove', onResize);
+    document.removeEventListener('mouseup', stopResize);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }
+
+  // ── Filtering ─────────────────────────────────────────────────────
+  function applyFilters() {
+    const q   = (document.getElementById('gsl-search')?.value || '').toLowerCase().trim();
+    const fp  = document.getElementById('gsl-partner')?.value  || '';
+    const fa  = document.getElementById('gsl-action')?.value   || '';
+    const fpr = document.getElementById('gsl-protocol')?.value || '';
+    const fs  = document.getElementById('gsl-server')?.value   || '';
+    const d0  = document.getElementById('gsl-date-from')?.value || '';
+    const d1  = document.getElementById('gsl-date-to')?.value   || '';
+
+    filteredRecords = allRecords.filter(r => {
+      if (qfSet.has('hide-list') && r.action === 'list') return false;
+      if (qfSet.has('files-only') && (r.filename === '*' || !r.filename)) return false;
+      if (qfSet.has('uploads-only') && r.action !== 'upload') return false;
+      if (qfSet.has('downloads-only') && r.action !== 'download') return false;
+      if (q) {
+        const hay = [r.sourcePath, r.destPath, r.partner, r.host, r.user, r.filename, r.server, r.action].join(' ').toLowerCase();
+        if (!q.split(/\s+/).every(t => hay.includes(t))) return false;
+      }
+      if (fp && r.partner !== fp) return false;
+      if (fa && r.action !== fa) return false;
+      if (fpr && r.protocol !== fpr) return false;
+      if (fs && r.server !== fs) return false;
+      if (d0 && r.timestamp.substring(0, 10) < d0) return false;
+      if (d1 && r.timestamp.substring(0, 10) > d1) return false;
+      return true;
+    });
+    doSort();
+    currentPage = 1;
+    renderTable();
+  }
+
+  function resetFilters() {
+    const s = document.getElementById('gsl-search'); if (s) s.value = '';
+    ['gsl-partner', 'gsl-action', 'gsl-protocol', 'gsl-server'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+    const df = document.getElementById('gsl-date-from'); if (df) df.value = '';
+    const dt = document.getElementById('gsl-date-to');   if (dt) dt.value = '';
+    qfSet.clear();
+    el.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+    applyFilters();
+  }
+
+  function toggleQF(btn, name) {
+    if (name === 'uploads-only')   { qfSet.delete('downloads-only'); el.querySelectorAll('.filter-chip').forEach(c => { if (c.dataset.qf === 'downloads-only') c.classList.remove('active'); }); }
+    if (name === 'downloads-only') { qfSet.delete('uploads-only');   el.querySelectorAll('.filter-chip').forEach(c => { if (c.dataset.qf === 'uploads-only')   c.classList.remove('active'); }); }
+    if (qfSet.has(name)) { qfSet.delete(name); btn.classList.remove('active'); }
+    else                 { qfSet.add(name);    btn.classList.add('active'); }
+    applyFilters();
+  }
+
+  // ── Sorting ───────────────────────────────────────────────────────
+  function sortBy(f) {
+    if (sortField === f) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+    else { sortField = f; sortDir = f === 'timestamp' ? 'desc' : 'asc'; }
+    renderHeaders();
+    doSort();
+    renderTable();
+  }
+
+  function doSort() {
+    const m = {
+      timestamp: r => r.timestamp, server: r => r.server, protocol: r => r.protocol, host: r => r.host,
+      user: r => r.user, action: r => r.action, partner: r => r.partner, filename: r => r.filename,
+      source: r => r.sourcePath, dest: r => r.destPath, size: r => r.size,
+    };
+    const g = m[sortField] || m.timestamp;
+    filteredRecords.sort((a, b) => {
+      const va = g(a), vb = g(b);
+      if (typeof va === 'string') { const c = va.localeCompare(vb); return sortDir === 'asc' ? c : -c; }
+      return sortDir === 'asc' ? va - vb : vb - va;
+    });
+  }
+
+  // ── Render table ──────────────────────────────────────────────────
+  function renderTable() {
+    const tot = filteredRecords.length;
+    const tp  = Math.max(1, Math.ceil(tot / PAGE_SIZE));
+    if (currentPage > tp) currentPage = tp;
+    const countEl = document.getElementById('gsl-result-count');
+    if (countEl) countEl.innerHTML = `Showing <strong>${tot.toLocaleString()}</strong> of ${allRecords.length.toLocaleString()} records`;
+    const s  = (currentPage - 1) * PAGE_SIZE;
+    const pg = filteredRecords.slice(s, s + PAGE_SIZE);
+    const q  = (document.getElementById('gsl-search')?.value || '').toLowerCase().trim();
+    const vis = COLS.filter(c => c.vis);
+
+    const body = document.getElementById('gsl-table-body');
+    if (body) {
+      body.innerHTML = pg.map(r => {
+        let cells = '';
+        for (const c of vis) {
+          const st = `width:${c.w}px;min-width:50px`;
+          switch (c.id) {
+            case 'timestamp': cells += `<td class="font-mono text-sm" style="${st};white-space:nowrap">${hl(r.timestamp, q)}</td>`; break;
+            case 'server':    cells += `<td class="font-mono text-sm" style="${st}">${hl(r.server, q)}</td>`; break;
+            case 'protocol':  cells += `<td style="${st}"><span class="badge ${r.protocol === 'sftp' ? 'badge-accent' : 'badge-muted'}">${esc(r.protocol)}</span></td>`; break;
+            case 'host':      cells += `<td style="${st}">${hl(r.host, q) || dash()}</td>`; break;
+            case 'user':      cells += `<td style="${st}">${hl(r.user, q) || dash()}</td>`; break;
+            case 'action':    cells += `<td style="${st}"><span class="badge ${r.action === 'download' ? 'badge-success' : r.action === 'upload' ? 'badge-warn' : 'badge-muted'}">${esc(r.action)}</span></td>`; break;
+            case 'partner':   cells += `<td style="${st}"><span class="gsl-partner">${hl(r.partner, q)}</span></td>`; break;
+            case 'filename':  cells += `<td class="font-mono text-sm" style="${st}"><span class="gsl-filename">${hl(r.filename, q)}</span></td>`; break;
+            case 'source':    cells += `<td class="gsl-path-cell" style="${st}">${hlPath(r.sourcePath, q)}</td>`; break;
+            case 'dest':      cells += `<td class="gsl-path-cell" style="${st}">${hlPath(r.destPath, q)}</td>`; break;
+            case 'size':      cells += `<td class="font-mono text-sm" style="${st}">${r.size > 0 ? fmtBytes(r.size) : dash()}</td>`; break;
+          }
+        }
+        return `<tr>${cells}</tr>`;
+      }).join('');
+    }
+
+    renderPg(tp, 'gsl-pagination');
+    renderPg(tp, 'gsl-pagination-bottom');
+  }
+
+  function renderPg(tot, id) {
+    const container = document.getElementById(id);
+    if (!container) return;
+    if (tot <= 1) { container.innerHTML = ''; return; }
+    let h = `<button class="btn btn-ghost btn-sm" data-pg="${currentPage - 1}" ${currentPage === 1 ? 'disabled' : ''}>‹</button>`;
+    let pgs = [];
+    if (tot <= 7) pgs = Array.from({ length: tot }, (_, i) => i + 1);
+    else {
+      pgs = [1];
+      if (currentPage > 3) pgs.push('…');
+      for (let i = Math.max(2, currentPage - 1); i <= Math.min(tot - 1, currentPage + 1); i++) pgs.push(i);
+      if (currentPage < tot - 2) pgs.push('…');
+      pgs.push(tot);
+    }
+    for (const p of pgs) h += p === '…' ? `<span class="text-muted text-sm">…</span>` : `<button class="btn btn-ghost btn-sm${p === currentPage ? ' btn-primary' : ''}" data-pg="${p}">${p}</button>`;
+    h += `<button class="btn btn-ghost btn-sm" data-pg="${currentPage + 1}" ${currentPage >= tot ? 'disabled' : ''}>›</button>`;
+    container.innerHTML = h;
+    container.querySelectorAll('button[data-pg]').forEach(btn => {
+      btn.addEventListener('click', () => goPage(+btn.dataset.pg));
+    });
+  }
+
+  function goPage(p) {
+    currentPage = Math.max(1, Math.min(p, Math.ceil(filteredRecords.length / PAGE_SIZE)));
+    renderTable();
+    document.getElementById('gsl-table-wrap')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // ── Highlight helpers ───────────────────────────────────────────────
+  function hl(t, q) {
+    if (!q || !t) return esc(t);
+    let r = esc(t);
+    for (const tk of q.split(/\s+/).filter(Boolean)) r = r.replace(new RegExp(`(${escRx(tk)})`, 'gi'), '<span class="gsl-hl">$1</span>');
+    return r;
+  }
+  function hlPath(p, q) {
+    if (!p) return dash();
+    let d = esc(p);
+    const segs = p.replace(/\//g, '\\').split('\\');
+    const fn   = segs[segs.length - 1];
+    if (fn && fn !== '*') d = d.replace(esc(fn), `<span class="gsl-filename">${esc(fn)}</span>`);
+    if (q) for (const tk of q.split(/\s+/).filter(Boolean)) d = d.replace(new RegExp(`(${escRx(tk)})`, 'gi'), '<span class="gsl-hl">$1</span>');
+    return d;
+  }
+
+  // ── Export ────────────────────────────────────────────────────────
+  function fieldMap(r) {
+    return { timestamp: r.timestamp, server: r.server, protocol: r.protocol, host: r.host, user: r.user, action: r.action, partner: r.partner, filename: r.filename, source: r.sourcePath, dest: r.destPath, size: r.size };
+  }
+
+  function exportCSV() {
+    const vis = COLS.filter(c => c.vis);
+    const hd  = vis.map(c => c.label);
+    const recs = filteredRecords.map(r => vis.map(c => fieldMap(r)[c.id] ?? ''));
+    const csv = [hd, ...recs].map(row => row.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = `gs_log_export_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+  }
+
+  function copyTable() {
+    const vis = COLS.filter(c => c.vis);
+    const hd = vis.map(c => c.label).join('\t');
+    const rows = filteredRecords.slice(0, 500).map(r => vis.map(c => fieldMap(r)[c.id] ?? '').join('\t'));
+    navigator.clipboard.writeText([hd, ...rows].join('\n')).then(() =>
+      alert(`Copied ${Math.min(500, filteredRecords.length)} rows${filteredRecords.length > 500 ? ' (first 500)' : ''}`));
+  }
+
+  // ── Event wiring ──────────────────────────────────────────────────
+  function wireEvents() {
+    document.getElementById('gsl-refresh')?.addEventListener('click', async () => {
+      await loadRecords();
+      renderFull();
+    });
+
+    document.getElementById('gsl-src-profile')?.addEventListener('change', e => { srcProfileId = e.target.value; });
+    document.getElementById('gsl-src-path')?.addEventListener('input', e => { srcPath = e.target.value; });
+    document.getElementById('gsl-browse')?.addEventListener('click', () => {
+      openFolderBrowser(srcProfileId, srcPath, p => {
+        srcPath = p;
+        const inp = document.getElementById('gsl-src-path');
+        if (inp) inp.value = p;
+      });
+    });
+
+    document.getElementById('gsl-save')?.addEventListener('click', async () => {
+      const btn = document.getElementById('gsl-save');
+      const msg = document.getElementById('gsl-save-msg');
+      btn.disabled = true; btn.textContent = 'Saving…';
+      try {
+        const res = await API.putJSON('/api/settings', { gsLogsProfileId: srcProfileId || null, gsLogsPath: srcPath || '' });
+        if (msg) { msg.textContent = 'Saved.'; msg.className = 'text-muted text-sm'; }
+        await loadRecords();
+        renderFull();
+      } catch (err) {
+        if (msg) { msg.textContent = `Failed to save: ${err.message}`; msg.className = 'text-danger text-sm'; }
+        btn.disabled = false; btn.textContent = 'Save';
+      }
+    });
+
+    if (loadError) return;
+
+    let searchTimer;
+    document.getElementById('gsl-search')?.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(applyFilters, 200);
+    });
+    ['gsl-partner', 'gsl-action', 'gsl-protocol', 'gsl-server', 'gsl-date-from', 'gsl-date-to'].forEach(id => {
+      document.getElementById(id)?.addEventListener('change', applyFilters);
+    });
+    document.getElementById('gsl-reset')?.addEventListener('click', resetFilters);
+
+    el.querySelectorAll('.filter-chip').forEach(btn => {
+      btn.addEventListener('click', () => toggleQF(btn, btn.dataset.qf));
+    });
+
+    document.getElementById('gsl-export')?.addEventListener('click', exportCSV);
+    document.getElementById('gsl-copy')?.addEventListener('click', copyTable);
+    document.getElementById('gsl-col-toggle')?.addEventListener('click', toggleColPanel);
+
+    document.removeEventListener('click', closeColPanelOnOutsideClick);
+    document.addEventListener('click', closeColPanelOnOutsideClick);
+  }
+
+  loadAll();
+  return () => document.removeEventListener('click', closeColPanelOnOutsideClick);
+};
+
 // ── Settings ──────────────────────────────────────────────────────────
 VIEWS.settings = function(el) {
   const isAdmin = app.user?.role === 'admin';
@@ -2261,7 +2797,8 @@ VIEWS.settings = function(el) {
   const TABS = [
     ...(isAdmin ? [{ id: 'users',   label: 'Users' }] : []),
     { id: 'tags', label: 'Tag Keys' },
-    ...(isAdmin ? [{ id: 'session', label: 'Session & Retention' }] : []),
+    ...(isAdmin ? [{ id: 'session',  label: 'Session & Retention' }] : []),
+    ...(isAdmin ? [{ id: 'features', label: 'Features' }] : []),
     ...(isAdmin ? [{ id: 'pgp',     label: 'PGP Keys' }] : []),
     ...(isAdmin ? [{ id: 'ssh',     label: 'SSH Keys' }] : []),
     { id: 'password', label: 'Password' },
@@ -2315,6 +2852,17 @@ VIEWS.settings = function(el) {
           <h2 class="settings-section-title">Session &amp; Retention</h2>
         </div>
         <div id="settings-form-wrap"><div class="loading-center"><div class="spinner"></div></div></div>
+      </section>
+      ` : ''}
+
+      <!-- ── Features ──────────────────────────── -->
+      ${isAdmin ? `
+      <section class="card settings-section" data-tab="features"${activeTab !== 'features' ? ' style="display:none"' : ''}>
+        <div class="settings-section-hd">
+          <h2 class="settings-section-title">Features</h2>
+        </div>
+        <p class="text-muted text-sm" style="margin-bottom:12px">Optional features, off by default. Turning one on adds it to the sidebar for every user; turning it off hides it and blocks its API.</p>
+        <div id="features-list"><div class="loading-center"><div class="spinner"></div></div></div>
       </section>
       ` : ''}
 
@@ -2400,6 +2948,7 @@ VIEWS.settings = function(el) {
     if (isAdmin) renderUsers(users);
     renderTagKeys(tagKeys);
     if (isAdmin) renderSettingsForm(settings);
+    if (isAdmin) renderFeatures(settings);
     if (isAdmin) renderPgpKeys(pgpKeysList);
     if (isAdmin) renderSshKeys(sshKeysList);
   });
@@ -2642,6 +3191,53 @@ VIEWS.settings = function(el) {
         errEl.textContent = err.message;
         errEl.classList.remove('hidden');
       }
+    });
+  }
+
+  // ── Features ─────────────────────────────────────────────────────────
+  const FEATURE_DEFS = [
+    {
+      key:   'gsLogsBrowser',
+      title: 'GlobalScape Log Browser',
+      desc:  'Adds a "GS Logs" sidebar view for browsing parsed GlobalScape EFT log records from a configured folder.',
+    },
+    {
+      key:   'ruleImport',
+      title: 'Rule Import',
+      desc:  'Adds an "Import" page for staging and committing rules/profiles from a GlobalScape migration export.',
+    },
+  ];
+
+  function renderFeatures(cfg) {
+    const wrap = document.getElementById('features-list');
+    if (!wrap) return;
+    const feats = { ...(cfg.features || {}) };
+
+    wrap.innerHTML = FEATURE_DEFS.map(d => `
+      <div class="feature-row" data-feat="${d.key}">
+        <div class="feature-row-info">
+          <div class="feature-row-title">${esc(d.title)}</div>
+          <div class="field-hint">${esc(d.desc)}</div>
+        </div>
+        <div class="feature-row-toggle" id="feat-toggle-${d.key}"></div>
+      </div>`).join('');
+
+    FEATURE_DEFS.forEach(d => {
+      const holder = document.getElementById(`feat-toggle-${d.key}`);
+      if (!holder) return;
+      holder.appendChild(makeToggle(Boolean(feats[d.key]), async checked => {
+        const prev = feats[d.key];
+        feats[d.key] = checked;
+        try {
+          const updated = await API.putJSON('/api/settings', { features: { [d.key]: checked } });
+          app.features = updated.features || feats;
+          buildNav();
+        } catch (err) {
+          feats[d.key] = prev;
+          alert(`Failed to save "${d.title}": ${err.message}`);
+          renderFeatures({ features: feats });
+        }
+      }));
     });
   }
 

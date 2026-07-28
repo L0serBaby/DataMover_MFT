@@ -101,6 +101,8 @@ app.use('/api/logs',     require('./api/logs'));
 app.use('/api/pgp',      require('./api/pgp'));
 app.use('/api/tags',     require('./api/tags'));
 app.use('/api/settings', require('./api/settings'));
+app.use('/api/gs-logs',  require('./api/gs-logs'));
+app.use('/api/import',   require('./api/import'));
 
 // ── Static UI ─────────────────────────────────────────────────────────────────
 

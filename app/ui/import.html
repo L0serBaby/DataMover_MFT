@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Import Staging — DataMover</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    /* ── Import page layout ─────────────────────────────────────────────── */
+    body { min-height: 100vh; background: var(--bg); }
+
+    .imp-page { display: flex; flex-direction: column; min-height: 100vh; }
+
+    .imp-header {
+      position: sticky; top: 0; z-index: 50;
+      display: flex; align-items: center; gap: 16px;
+      padding: 0 28px; height: var(--topbar-h);
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .imp-back {
+      display: flex; align-items: center; gap: 5px;
+      color: var(--muted); font-size: 13px; text-decoration: none;
+      transition: color .15s;
+    }
+    .imp-back:hover { color: var(--text); text-decoration: none; }
+
+    .imp-title { font-size: 15px; font-weight: 600; color: var(--text); }
+    .imp-meta  { font-size: 12px; color: var(--muted); }
+
+    .imp-header-end {
+      margin-left: auto;
+      display: flex; align-items: center; gap: 10px;
+    }
+
+    .imp-body {
+      flex: 1; padding: 24px 28px;
+      display: flex; flex-direction: column; gap: 24px;
+      max-width: 1700px; width: 100%; margin: 0 auto;
+    }
+
+    /* ── Section ────────────────────────────────────────────────────────── */
+    .imp-section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+
+    .imp-sec-hd {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 20px; border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+
+    .imp-sec-title {
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .07em; color: var(--muted);
+    }
+
+    .imp-sec-count {
+      font-size: 12px; color: var(--text-2);
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 999px; padding: 1px 8px;
+    }
+
+    .imp-sec-end { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+    /* ── Toolbar rows ────────────────────────────────────────────────────── */
+    .imp-toolbar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 20px; border-bottom: 1px solid var(--border);
+      flex-wrap: wrap; background: var(--surface-2);
+    }
+
+    .imp-toolbar-label {
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    }
+
+    /* ── Inline editable cells ──────────────────────────────────────────── */
+    .editable {
+      cursor: text; border-radius: 3px;
+      padding: 1px 4px; margin: -1px -4px;
+      display: inline-block; min-width: 20px;
+      transition: background .1s; white-space: pre-wrap; word-break: break-all;
+    }
+    .editable:hover  { background: var(--surface-3); }
+    .editable:focus  { background: var(--surface-3); outline: none; }
+
+    .edit-inp {
+      background: var(--surface-2);
+      border: 1px solid var(--accent); box-shadow: 0 0 0 2px var(--accent-glow);
+      border-radius: var(--radius-sm); color: var(--text);
+      padding: 2px 6px; font-size: inherit; font-family: inherit;
+      outline: none; width: 100%;
+    }
+
+    /* ── Warning rows ───────────────────────────────────────────────────── */
+    tr.rule-warn-row > td { background: rgba(245,158,11,.06) !important; }
+
+    .warn-detail-row > td {
+      padding: 4px 14px 7px 52px !important;
+      background: rgba(245,158,11,.08) !important;
+      border-bottom: 1px solid rgba(245,158,11,.18) !important;
+    }
+
+    .warn-text {
+      font-size: 11.5px; color: #fbbf24; display: block;
+    }
+
+    .warn-icon { color: var(--warn); cursor: help; font-size: 14px; }
+
+    /* ── 3-hop chain ────────────────────────────────────────────────────── */
+    .hop-chain { display: flex; flex-direction: column; gap: 3px; }
+
+    .hop-row { display: flex; align-items: baseline; gap: 5px; }
+
+    .hop-lbl {
+      font-size: 9px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; padding: 1px 5px; border-radius: 3px; flex-shrink: 0;
+    }
+    .hop-lbl-sftp  { background: rgba(139,92,246,.2);  color: #c4b5fd; }
+    .hop-lbl-local { background: rgba(245,158,11,.2);  color: #fbbf24; }
+    .hop-lbl-smb   { background: rgba(59,130,246,.15); color: #93c5fd; }
+
+    .hop-path {
+      font-family: 'Cascadia Code','Fira Code',Consolas,monospace;
+      font-size: 10.5px; color: var(--text-2);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      max-width: 220px;
+    }
+
+    .hop-arrow { color: var(--muted); font-size: 11px; padding-left: 8px; }
+
+    .btn-collapse {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 9px; margin-top: 5px;
+      background: rgba(245,158,11,.1); border: 1px solid rgba(245,158,11,.3);
+      border-radius: var(--radius-sm); color: #fbbf24;
+      font-size: 11px; font-weight: 600; cursor: pointer;
+      transition: background .1s;
+    }
+    .btn-collapse:hover { background: rgba(245,158,11,.2); }
+
+    /* ── Destination list ───────────────────────────────────────────────── */
+    .dest-list { display: flex; flex-direction: column; gap: 2px; }
+
+    .dest-path {
+      font-family: 'Cascadia Code','Fira Code',Consolas,monospace;
+      font-size: 10.5px; color: var(--text-2);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      max-width: 260px; display: block;
+    }
+
+    /* ── Group cells ────────────────────────────────────────────────────── */
+    .group-sel-wrap { display: flex; align-items: center; gap: 4px; }
+
+    .grp-sel {
+      flex: 1; min-width: 120px; max-width: 180px;
+      padding: 4px 24px 4px 8px;
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text); font-size: 12px;
+      outline: none; cursor: pointer; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2364748b' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 7px center;
+      transition: border-color .1s;
+    }
+    .grp-sel:focus { border-color: var(--accent); }
+
+    .grp-new-inp {
+      display: none; padding: 4px 8px;
+      background: var(--surface-2); border: 1px solid var(--accent);
+      border-radius: var(--radius-sm); color: var(--text); font-size: 12px;
+      outline: none; width: 130px;
+    }
+    .grp-new-inp.visible { display: inline-block; }
+
+    /* ── Groups manager ─────────────────────────────────────────────────── */
+    .grp-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 2px 8px; margin: 2px;
+      background: var(--surface-3); border: 1px solid var(--border-2);
+      border-radius: 14px; font-size: 12px; color: var(--text);
+    }
+
+    .grp-rename-inp {
+      background: none; border: none; color: var(--text);
+      font-size: 12px; font-family: inherit; outline: none;
+      min-width: 60px; max-width: 160px;
+      border-bottom: 1px solid transparent; transition: border-color .1s;
+    }
+    .grp-rename-inp:focus { border-bottom-color: var(--accent); }
+
+    /* ── Inline action / schedule selects ──────────────────────────────── */
+    .sel-sm {
+      padding: 3px 6px; appearance: none;
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text);
+      font-size: 12px; outline: none; cursor: pointer;
+    }
+    .sel-sm:focus { border-color: var(--accent); }
+
+    /* ── Import result ──────────────────────────────────────────────────── */
+    .imp-result {
+      background: var(--success-bg); border: 1px solid rgba(34,197,94,.3);
+      border-radius: var(--radius-lg); padding: 16px 20px;
+    }
+    .imp-result-title { font-size: 14px; font-weight: 600; color: var(--success); margin-bottom: 10px; }
+    .imp-result-stats { display: flex; gap: 28px; flex-wrap: wrap; }
+    .imp-stat-val { font-size: 24px; font-weight: 700; color: var(--text); line-height: 1; }
+    .imp-stat-lbl { font-size: 11px; color: var(--text-2); text-transform: uppercase; letter-spacing: .06em; margin-top: 2px; }
+
+    /* ── Pagination ─────────────────────────────────────────────────────── */
+    .imp-pagination {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 20px; border-top: 1px solid var(--border);
+      font-size: 13px; color: var(--muted);
+    }
+
+    /* ── Scrollable wide table ──────────────────────────────────────────── */
+    .imp-tscroll { overflow-x: auto; }
+
+    #rules-table  { min-width: 1080px; }
+    #rules-table  td, #rules-table  th { padding: 7px 12px; vertical-align: middle; }
+    #profiles-table td, #profiles-table th { padding: 8px 12px; vertical-align: middle; }
+
+    .td-chk   { width: 38px; }
+    .td-name  { min-width: 180px; max-width: 240px; }
+    .td-src   { min-width: 200px; max-width: 280px; }
+    .td-dest  { min-width: 200px; max-width: 280px; }
+    .td-act   { width: 80px; }
+    .td-sched { min-width: 130px; }
+    .td-grp   { min-width: 160px; }
+    .td-wi    { width: 32px; text-align: center; }
+
+    /* Search input */
+    .imp-search {
+      padding: 5px 11px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text);
+      font-size: 13px; outline: none; width: 210px; transition: border-color .15s;
+    }
+    .imp-search:focus { border-color: var(--accent); }
+  </style>
+</head>
+<body>
+<div class="imp-page">
+
+  <!-- ═══ HEADER ════════════════════════════════════════════════════════ -->
+  <header class="imp-header">
+    <a href="/" class="imp-back">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 3L5 7l4 4"/></svg>
+      App
+    </a>
+
+    <div class="imp-title">GS Import Staging</div>
+    <span class="imp-meta" id="imp-meta">Loading…</span>
+
+    <div class="imp-header-end">
+      <span id="sel-label" class="text-muted text-sm"></span>
+      <button class="btn btn-secondary btn-sm" id="sel-all-btn">Select All</button>
+      <button class="btn btn-primary" id="import-btn" disabled>
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v11M5 9l5 5 5-5"/><path d="M3 17h14"/></svg>
+        Import Selected
+      </button>
+    </div>
+  </header>
+
+  <!-- ═══ BODY ══════════════════════════════════════════════════════════ -->
+  <div class="imp-body">
+
+    <!-- Import result banner -->
+    <div id="imp-result" class="imp-result hidden"></div>
+
+    <!-- ── Profiles ─────────────────────────────────────────────────── -->
+    <section class="imp-section">
+      <div class="imp-sec-hd">
+        <span class="imp-sec-title">Profiles</span>
+        <span class="imp-sec-count" id="prof-count">0</span>
+        <div class="imp-sec-end">
+          <button class="btn btn-ghost btn-xs" id="sel-all-prof-btn">Select All</button>
+        </div>
+      </div>
+      <div class="imp-tscroll">
+        <table id="profiles-table">
+          <thead><tr>
+            <th class="td-chk"><input type="checkbox" id="prof-chk-all" title="Select all profiles"></th>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Host / Path</th>
+            <th>Username</th>
+            <th>Warning</th>
+          </tr></thead>
+          <tbody id="prof-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── Rules ────────────────────────────────────────────────────── -->
+    <section class="imp-section">
+      <div class="imp-sec-hd">
+        <span class="imp-sec-title">Rules</span>
+        <span class="imp-sec-count" id="rules-count">0</span>
+        <div class="imp-sec-end">
+          <input class="imp-search" id="rules-search" placeholder="Search rules…" type="search">
+          <select class="sel-sm" id="warn-filter" title="Filter by warning">
+            <option value="">All rules</option>
+            <option value="warn">⚠ With warnings</option>
+            <option value="ok">✓ No warnings</option>
+          </select>
+          <button class="btn btn-ghost btn-xs" id="sel-all-rules-btn">Select All</button>
+        </div>
+      </div>
+
+      <!-- Groups manager row -->
+      <div class="imp-toolbar" id="groups-toolbar">
+        <span class="imp-toolbar-label">Existing groups:</span>
+        <span id="groups-pills"><span class="text-muted text-sm">None</span></span>
+      </div>
+
+      <!-- Bulk assign row -->
+      <div class="imp-toolbar">
+        <span class="imp-toolbar-label">Bulk assign group:</span>
+        <select class="grp-sel" id="bulk-grp-sel" style="max-width:200px">
+          <option value="">— Select —</option>
+        </select>
+        <input id="bulk-new-inp" class="grp-new-inp" placeholder="New group name…">
+        <button class="btn btn-secondary btn-sm" id="bulk-assign-btn">Assign to selected</button>
+        <span class="text-muted text-sm" id="bulk-sel-label"></span>
+      </div>
+
+      <div class="imp-tscroll">
+        <table id="rules-table">
+          <thead><tr>
+            <th class="td-chk"><input type="checkbox" id="rules-chk-all" title="Select all on page"></th>
+            <th class="td-name">Name</th>
+            <th class="td-src">Source</th>
+            <th class="td-dest">Destination(s)</th>
+            <th class="td-act">Action</th>
+            <th class="td-sched">Schedule</th>
+            <th class="td-grp">Group</th>
+            <th class="td-wi" title="Import warnings">⚠</th>
+          </tr></thead>
+          <tbody id="rules-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="imp-pagination" id="rules-pagination"></div>
+    </section>
+
+  </div><!-- /.imp-body -->
+</div><!-- /.imp-page -->
+
+<script>
+'use strict';
+
+// ════════════════════════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════════════════════════
+
+let staging  = null;
+let groups   = [];
+let editedRules    = [];
+let editedProfiles = [];
+let pendingGroups  = {};   // { uuid: { id, name } }
+
+let selRules    = new Set();  // indices into editedRules
+let selProfiles = new Set();  // indices into editedProfiles
+
+let rulesPage  = 0;
+const PAGE_SZ  = 50;
+let rulesQuery = '';
+let warnFilter = '';
+
+// ════════════════════════════════════════════════════════════════════════
+//  API
+// ════════════════════════════════════════════════════════════════════════
+
+async function api(method, url, body) {
+  const opts = { method };
+  if (body !== undefined) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, opts);
+  if (res.status === 401) { location.href = '/'; return null; }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  return res.json();
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════════════════════════════════
+
+async function init() {
+  const me = await api('GET', '/api/auth/me');
+  if (!me) return;
+
+  try {
+    [staging, groups] = await Promise.all([
+      api('GET', '/api/import/staging'),
+      api('GET', '/api/groups'),
+    ]);
+  } catch (err) {
+    setMeta('Error: ' + err.message, true);
+    return;
+  }
+
+  if (!staging) return;
+
+  editedRules    = staging.rules.map(r => JSON.parse(JSON.stringify(r)));
+  editedProfiles = staging.profiles.map(p => JSON.parse(JSON.stringify(p)));
+
+  setMeta(`${editedRules.length} rules · ${editedProfiles.length} profiles`);
+  q('prof-count').textContent  = editedProfiles.length;
+  q('rules-count').textContent = editedRules.length;
+
+  renderGroupsManager();
+  rebuildBulkGroupSel();
+  renderProfiles();
+  renderRules();
+  bindGlobal();
+}
+
+function setMeta(text, isError) {
+  const el = q('imp-meta');
+  el.textContent = text;
+  el.style.color = isError ? 'var(--danger)' : '';
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  GROUPS MANAGER
+// ════════════════════════════════════════════════════════════════════════
+
+function allGroups() {
+  return [...groups, ...Object.values(pendingGroups)];
+}
+
+function groupName(id) {
+  if (!id) return '';
+  const g = allGroups().find(g => g.id === id);
+  return g ? g.name : id;
+}
+
+function renderGroupsManager() {
+  const el = q('groups-pills');
+  if (!groups.length) {
+    el.innerHTML = '<span class="text-muted text-sm">No existing groups — all groups will be created on import</span>';
+    return;
+  }
+  el.innerHTML = groups.map(g => `
+    <span class="grp-pill" data-gid="${g.id}">
+      <input class="grp-rename-inp" type="text" value="${esc(g.name)}"
+             data-gid="${g.id}" title="Double-click to rename">
+    </span>
+  `).join('');
+
+  el.querySelectorAll('.grp-rename-inp').forEach(inp => {
+    const gid = inp.dataset.gid;
+    let orig = inp.value;
+
+    inp.addEventListener('focus', () => { orig = inp.value; });
+
+    inp.addEventListener('blur', async () => {
+      const name = inp.value.trim();
+      if (!name || name === orig) { inp.value = orig; return; }
+      try {
+        const updated = await api('PUT', `/api/groups/${gid}`, { name });
+        if (!updated) { inp.value = orig; return; }
+        const g = groups.find(g => g.id === gid);
+        if (g) g.name = updated.name;
+        orig = updated.name;
+        rebuildBulkGroupSel();
+        // Update any matching options in rendered group selects
+        document.querySelectorAll(`.grp-sel option[value="${gid}"]`).forEach(opt => {
+          opt.textContent = updated.name;
+        });
+      } catch (err) {
+        alert('Rename failed: ' + err.message);
+        inp.value = orig;
+      }
+    });
+
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') inp.blur();
+      if (e.key === 'Escape') { inp.value = orig; inp.blur(); }
+    });
+  });
+}
+
+function rebuildBulkGroupSel() {
+  const sel = q('bulk-grp-sel');
+  sel.innerHTML =
+    `<option value="">— Select —</option>` +
+    `<option value="">— Ungrouped —</option>` +
+    allGroups().map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join('') +
+    `<option value="__new__">+ New group…</option>`;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  PROFILES TABLE
+// ════════════════════════════════════════════════════════════════════════
+
+function renderProfiles() {
+  const tbody = q('prof-tbody');
+  if (!editedProfiles.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="text-muted" style="padding:20px;text-align:center">No profiles in staging file</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = editedProfiles.map((p, i) => {
+    const addr = p.type === 'sftp' ? (p.host || '') : (p.path || '');
+    const chk  = selProfiles.has(i) ? 'checked' : '';
+    return `
+      <tr>
+        <td><input type="checkbox" class="p-chk" data-idx="${i}" ${chk}></td>
+        <td><span class="editable" data-m="profiles" data-i="${i}" data-f="name">${esc(p.name)}</span></td>
+        <td><code>${esc(p.type)}</code></td>
+        <td><span class="editable path-mono" style="font-size:11px" data-m="profiles" data-i="${i}" data-f="${p.type === 'sftp' ? 'host' : 'path'}">${esc(addr)}</span></td>
+        <td><span class="editable" data-m="profiles" data-i="${i}" data-f="username">${esc(p.username || '')}</span></td>
+        <td>${p.importWarning ? `<span class="badge badge-warn" title="${esc(p.importWarning)}">⚠ ${esc(p.importWarning)}</span>` : ''}</td>
+      </tr>
+    `;
+  }).join('');
+
+  bindEditable(tbody, 'profiles');
+
+  tbody.querySelectorAll('.p-chk').forEach(chk => {
+    chk.addEventListener('change', () => {
+      +chk.dataset.idx >= 0 && (chk.checked
+        ? selProfiles.add(+chk.dataset.idx)
+        : selProfiles.delete(+chk.dataset.idx));
+      updateSelLabel();
+    });
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  RULES TABLE
+// ════════════════════════════════════════════════════════════════════════
+
+function filteredRules() {
+  const qlo = rulesQuery.toLowerCase();
+  return editedRules
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => {
+      if (qlo && !r.name.toLowerCase().includes(qlo) &&
+          !(r.source?.path || '').toLowerCase().includes(qlo)) return false;
+      if (warnFilter === 'warn' && !r.importWarning) return false;
+      if (warnFilter === 'ok'   &&  r.importWarning) return false;
+      return true;
+    });
+}
+
+function renderRules() {
+  const all   = filteredRules();
+  const total = all.length;
+  const start = rulesPage * PAGE_SZ;
+  const end   = Math.min(start + PAGE_SZ, total);
+  const page  = all.slice(start, end);
+
+  const tbody = q('rules-tbody');
+  tbody.innerHTML = '';
+
+  if (!page.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="text-muted" style="padding:20px;text-align:center">No rules match the current filter</td></tr>';
+  } else {
+    page.forEach(({ r, i }) => appendRuleRow(tbody, r, i));
+  }
+
+  renderPagination(total, start, end);
+  bindEditable(tbody, 'rules');
+  bindGroupSelects(tbody);
+
+  tbody.querySelectorAll('.r-chk').forEach(chk => {
+    chk.addEventListener('change', () => {
+      +chk.dataset.idx >= 0 && (chk.checked
+        ? selRules.add(+chk.dataset.idx)
+        : selRules.delete(+chk.dataset.idx));
+      updateSelLabel();
+    });
+  });
+
+  tbody.querySelectorAll('.act-sel').forEach(sel => {
+    sel.addEventListener('change', () => {
+      editedRules[+sel.dataset.idx].action = sel.value;
+    });
+  });
+
+  updateSelLabel();
+}
+
+function appendRuleRow(tbody, r, i) {
+  const chk  = selRules.has(i) ? 'checked' : '';
+  const warn = r.importWarning;
+  const hasLWF = !!r.localWorkingFolder;
+
+  const tr = document.createElement('tr');
+  if (warn) tr.classList.add('rule-warn-row');
+  tr.dataset.ridx = i;
+
+  tr.innerHTML = `
+    <td class="td-chk"><input type="checkbox" class="r-chk" data-idx="${i}" ${chk}></td>
+    <td class="td-name">
+      <span class="editable" data-m="rules" data-i="${i}" data-f="name" style="font-weight:500">${esc(r.name)}</span>
+    </td>
+    <td class="td-src">${buildSrcCell(r, i)}</td>
+    <td class="td-dest">${buildDestCell(r)}</td>
+    <td class="td-act">
+      <select class="sel-sm act-sel" data-idx="${i}">
+        <option value="copy" ${r.action === 'copy' ? 'selected' : ''}>copy</option>
+        <option value="move" ${r.action === 'move' ? 'selected' : ''}>move</option>
+      </select>
+    </td>
+    <td class="td-sched">
+      <span class="editable path-mono" style="font-size:11px" data-m="rules" data-i="${i}" data-f="schedule">${esc(r.schedule || r.cron || 'manual')}</span>
+    </td>
+    <td class="td-grp">${buildGroupSel(r, i)}</td>
+    <td class="td-wi">${warn ? `<span class="warn-icon" title="${esc(warn)}">⚠</span>` : ''}</td>
+  `;
+
+  tbody.appendChild(tr);
+
+  // Collapse button
+  const colBtn = tr.querySelector('.btn-collapse');
+  if (colBtn) {
+    colBtn.addEventListener('click', () => {
+      delete editedRules[i].localWorkingFolder;
+      renderRules();
+    });
+  }
+
+  // Warning detail row
+  if (warn) {
+    const wtr = document.createElement('tr');
+    wtr.classList.add('warn-detail-row');
+    wtr.innerHTML = `<td colspan="8"><span class="warn-text">⚠ ${esc(warn)}</span></td>`;
+    tbody.appendChild(wtr);
+  }
+}
+
+function buildSrcCell(r, i) {
+  const sp = r.source?.path   || '';
+  const sf = r.source?.filter || '';
+  const lwf = r.localWorkingFolder;
+
+  if (lwf) {
+    const finalPaths = (r.destinations || []).map(d => d.path).filter(Boolean);
+    return `
+      <div class="hop-chain">
+        <div class="hop-row">
+          <span class="hop-lbl hop-lbl-sftp">SFTP</span>
+          <span class="hop-path" title="${esc(sp)}">${esc(trunc(sp))}</span>
+        </div>
+        <div class="hop-arrow">↓</div>
+        <div class="hop-row">
+          <span class="hop-lbl hop-lbl-local">Local</span>
+          <span class="hop-path" title="${esc(lwf)}">${esc(trunc(lwf))}</span>
+        </div>
+        <div class="hop-arrow">↓</div>
+        ${finalPaths.map(p => `
+          <div class="hop-row">
+            <span class="hop-lbl hop-lbl-smb">SMB</span>
+            <span class="hop-path" title="${esc(p)}">${esc(trunc(p))}</span>
+          </div>
+        `).join('')}
+        <button class="btn-collapse" data-idx="${i}" title="Remove middle hop; rule will transfer directly from SFTP to final destinations">
+          ✕ Collapse to direct transfer
+        </button>
+      </div>`;
+  }
+
+  return `
+    <div>
+      <div class="path-mono" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px" title="${esc(sp)}">${esc(trunc(sp, 50))}</div>
+      ${sf ? `<div class="text-muted" style="font-size:11px;margin-top:2px;font-family:monospace">${esc(sf)}</div>` : ''}
+    </div>`;
+}
+
+function buildDestCell(r) {
+  if (r.localWorkingFolder) {
+    return '<span class="text-muted text-sm">see chain ←</span>';
+  }
+  const dests = r.destinations || [];
+  if (!dests.length) return '<span class="badge badge-warn">missing</span>';
+  return `<div class="dest-list">` +
+    dests.slice(0, 3).map(d =>
+      `<span class="dest-path" title="${esc(d.path || '')}">${esc(trunc(d.path || '', 48))}</span>`
+    ).join('') +
+    (dests.length > 3 ? `<span class="text-muted text-sm">+${dests.length - 3} more</span>` : '') +
+    `</div>`;
+}
+
+function buildGroupSel(r, i) {
+  const cur = r.groupId || '';
+  const opts =
+    `<option value="">— Ungrouped —</option>` +
+    allGroups().map(g =>
+      `<option value="${g.id}" ${cur === g.id ? 'selected' : ''}>${esc(g.name)}</option>`
+    ).join('') +
+    `<option value="__new__">+ New group…</option>`;
+  return `
+    <div class="group-sel-wrap">
+      <select class="grp-sel grp-row-sel" data-idx="${i}">${opts}</select>
+      <input class="grp-new-inp" data-idx="${i}" placeholder="Group name…">
+    </div>`;
+}
+
+function bindGroupSelects(tbody) {
+  tbody.querySelectorAll('.grp-row-sel').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const idx = +sel.dataset.idx;
+      const inp = sel.closest('.group-sel-wrap').querySelector('.grp-new-inp');
+      if (sel.value === '__new__') {
+        inp.classList.add('visible');
+        inp.focus();
+      } else {
+        inp.classList.remove('visible');
+        editedRules[idx].groupId = sel.value || undefined;
+      }
+    });
+  });
+
+  tbody.querySelectorAll('.grp-new-inp').forEach(inp => {
+    const commit = () => {
+      const idx  = +inp.dataset.idx;
+      const name = inp.value.trim();
+      const wrap = inp.closest('.group-sel-wrap');
+      const sel  = wrap.querySelector('.grp-row-sel');
+
+      if (!name) {
+        inp.classList.remove('visible');
+        sel.value = '';
+        editedRules[idx].groupId = undefined;
+        return;
+      }
+
+      // Check if a pending group with this name already exists
+      let existing = Object.values(pendingGroups).find(g => g.name === name);
+      if (!existing) {
+        existing = allGroups().find(g => g.name === name);
+      }
+
+      let gid;
+      if (existing) {
+        gid = existing.id;
+      } else {
+        gid = crypto.randomUUID();
+        pendingGroups[gid] = { id: gid, name };
+        rebuildBulkGroupSel();
+        // Add option to this select (before the __new__ option)
+        const newOpt = document.createElement('option');
+        newOpt.value = gid;
+        newOpt.textContent = name;
+        sel.insertBefore(newOpt, sel.querySelector('option[value="__new__"]'));
+        // Also add to all other grp-row-sel dropdowns currently in the DOM
+        document.querySelectorAll('.grp-row-sel').forEach(other => {
+          if (other === sel) return;
+          if (!other.querySelector(`option[value="${gid}"]`)) {
+            const o = document.createElement('option');
+            o.value = gid; o.textContent = name;
+            other.insertBefore(o, other.querySelector('option[value="__new__"]'));
+          }
+        });
+      }
+
+      sel.value = gid;
+      editedRules[idx].groupId = gid;
+      inp.value = '';
+      inp.classList.remove('visible');
+    };
+
+    inp.addEventListener('blur', commit);
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') inp.blur();
+      if (e.key === 'Escape') { inp.value = ''; inp.blur(); }
+    });
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  INLINE EDITING
+// ════════════════════════════════════════════════════════════════════════
+
+function bindEditable(container, model) {
+  container.querySelectorAll(`.editable[data-m="${model}"]`).forEach(span => {
+    span.addEventListener('dblclick', () => startEdit(span));
+  });
+}
+
+function startEdit(span) {
+  if (span.querySelector('input')) return;
+  const original = span.textContent;
+  const inp = document.createElement('input');
+  inp.className = 'edit-inp';
+  inp.value = original;
+  span.textContent = '';
+  span.appendChild(inp);
+  inp.focus(); inp.select();
+
+  const commit = () => {
+    const val = inp.value.trim();
+    span.textContent = val;
+    applyEdit(span, val);
+  };
+
+  inp.addEventListener('blur', commit);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  inp.blur();
+    if (e.key === 'Escape') { span.textContent = original; }
+  });
+}
+
+function applyEdit(span, value) {
+  const m = span.dataset.m;
+  const i = +span.dataset.i;
+  const f = span.dataset.f;
+
+  if (m === 'profiles') {
+    editedProfiles[i][f] = value;
+  } else if (m === 'rules') {
+    if (f === 'name' || f === 'action') {
+      editedRules[i][f] = value;
+    } else if (f === 'schedule') {
+      editedRules[i].schedule = value;
+      editedRules[i].cron     = value === 'manual' ? undefined : value;
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  PAGINATION
+// ════════════════════════════════════════════════════════════════════════
+
+function renderPagination(total, start, end) {
+  const el = q('rules-pagination');
+  if (total <= PAGE_SZ) { el.innerHTML = ''; return; }
+
+  const totalPages = Math.ceil(total / PAGE_SZ);
+  const curPage    = rulesPage + 1;
+
+  el.innerHTML = `
+    <span>${start + 1}–${end} of ${total}</span>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button class="btn btn-ghost btn-sm" id="pg-prev" ${rulesPage === 0 ? 'disabled' : ''}>← Prev</button>
+      <span class="text-muted text-sm">Page ${curPage} / ${totalPages}</span>
+      <button class="btn btn-ghost btn-sm" id="pg-next" ${curPage >= totalPages ? 'disabled' : ''}>Next →</button>
+    </div>`;
+
+  q('pg-prev')?.addEventListener('click', () => { rulesPage = Math.max(0, rulesPage - 1); renderRules(); });
+  q('pg-next')?.addEventListener('click', () => { rulesPage = Math.min(totalPages - 1, rulesPage + 1); renderRules(); });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  SELECTION
+// ════════════════════════════════════════════════════════════════════════
+
+function updateSelLabel() {
+  const rc = selRules.size;
+  const pc = selProfiles.size;
+  const tot = rc + pc;
+  q('sel-label').textContent = tot > 0
+    ? `${tot} selected (${rc} rules, ${pc} profiles)` : '';
+  q('import-btn').disabled = tot === 0;
+  q('bulk-sel-label').textContent = rc > 0
+    ? `${rc} rule${rc !== 1 ? 's' : ''} selected` : '';
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  IMPORT
+// ════════════════════════════════════════════════════════════════════════
+
+async function doImport() {
+  const btn = q('import-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Importing…';
+
+  const rulesToSend    = [...selRules].map(i => editedRules[i]);
+  const profilesToSend = [...selProfiles].map(i => editedProfiles[i]);
+
+  // Pre-create any pending groups so they get real IDs and meaningful names
+  for (const [tempId, g] of Object.entries(pendingGroups)) {
+    const isReferenced = rulesToSend.some(r => r.groupId === tempId);
+    if (!isReferenced) continue;
+    try {
+      const created = await api('POST', '/api/groups', { name: g.name });
+      if (!created) continue;
+      // Replace temp ID everywhere
+      for (const arr of [rulesToSend, editedRules]) {
+        arr.forEach(r => { if (r.groupId === tempId) r.groupId = created.id; });
+      }
+      groups.push(created);
+      delete pendingGroups[tempId];
+    } catch (err) {
+      console.error('Group pre-create failed:', g.name, err.message);
+    }
+  }
+
+  try {
+    const result = await api('POST', '/api/import/commit', {
+      rules:    rulesToSend,
+      profiles: profilesToSend,
+    });
+    if (!result) return;
+    showResult(result);
+    selRules.clear();
+    selProfiles.clear();
+    renderRules();
+    renderProfiles();
+    updateSelLabel();
+  } catch (err) {
+    alert('Import failed: ' + err.message);
+  } finally {
+    btn.disabled = (selRules.size + selProfiles.size) === 0;
+    btn.innerHTML = `
+      <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v11M5 9l5 5 5-5"/><path d="M3 17h14"/></svg>
+      Import Selected`;
+  }
+}
+
+function showResult(result) {
+  const el = q('imp-result');
+  el.classList.remove('hidden');
+  el.innerHTML = `
+    <div class="imp-result-title">✓ Import complete</div>
+    <div class="imp-result-stats">
+      ${stat(result.imported.rules,    'Rules imported')}
+      ${stat(result.imported.profiles, 'Profiles imported')}
+      ${stat(result.imported.groups,   'Groups created')}
+      ${stat(result.skipped.rules,     'Rules skipped', true)}
+      ${stat(result.skipped.profiles,  'Profiles skipped', true)}
+    </div>`;
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function stat(val, lbl, muted) {
+  return `<div>
+    <div class="imp-stat-val${muted && val ? ' text-muted' : ''}">${val}</div>
+    <div class="imp-stat-lbl">${lbl}</div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  GLOBAL EVENTS
+// ════════════════════════════════════════════════════════════════════════
+
+function bindGlobal() {
+  q('import-btn').addEventListener('click', doImport);
+
+  // Select all (header button — rules + profiles)
+  q('sel-all-btn').addEventListener('click', () => {
+    const allRules   = filteredRules();
+    const allRuleSel = allRules.every(({ i }) => selRules.has(i));
+    const allProfSel = editedProfiles.every((_, i) => selProfiles.has(i));
+    const deselect   = allRuleSel && allProfSel;
+    allRules.forEach(({ i })    => deselect ? selRules.delete(i)    : selRules.add(i));
+    editedProfiles.forEach((_, i) => deselect ? selProfiles.delete(i) : selProfiles.add(i));
+    renderRules();
+    renderProfiles();
+  });
+
+  // Select all rules button
+  q('sel-all-rules-btn').addEventListener('click', () => {
+    const all = filteredRules();
+    const allSel = all.every(({ i }) => selRules.has(i));
+    all.forEach(({ i }) => allSel ? selRules.delete(i) : selRules.add(i));
+    renderRules();
+  });
+
+  // Select all profiles button
+  q('sel-all-prof-btn').addEventListener('click', () => {
+    const allSel = editedProfiles.every((_, i) => selProfiles.has(i));
+    editedProfiles.forEach((_, i) => allSel ? selProfiles.delete(i) : selProfiles.add(i));
+    renderProfiles();
+  });
+
+  // Select-all checkboxes
+  q('rules-chk-all').addEventListener('change', e => {
+    const page = filteredRules().slice(rulesPage * PAGE_SZ, (rulesPage + 1) * PAGE_SZ);
+    page.forEach(({ i }) => e.target.checked ? selRules.add(i) : selRules.delete(i));
+    renderRules();
+  });
+
+  q('prof-chk-all').addEventListener('change', e => {
+    editedProfiles.forEach((_, i) => e.target.checked ? selProfiles.add(i) : selProfiles.delete(i));
+    renderProfiles();
+  });
+
+  // Search
+  let searchTimer;
+  q('rules-search').addEventListener('input', e => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      rulesQuery = e.target.value.trim();
+      rulesPage  = 0;
+      renderRules();
+    }, 240);
+  });
+
+  // Warning filter
+  q('warn-filter').addEventListener('change', e => {
+    warnFilter = e.target.value;
+    rulesPage  = 0;
+    renderRules();
+  });
+
+  // Bulk group assign
+  q('bulk-grp-sel').addEventListener('change', e => {
+    const inp = q('bulk-new-inp');
+    if (e.target.value === '__new__') {
+      inp.classList.add('visible');
+      inp.focus();
+    } else {
+      inp.classList.remove('visible');
+    }
+  });
+
+  q('bulk-assign-btn').addEventListener('click', () => {
+    const sel = q('bulk-grp-sel');
+    const inp = q('bulk-new-inp');
+    let gid = sel.value;
+
+    if (gid === '__new__') {
+      const name = inp.value.trim();
+      if (!name) { inp.focus(); return; }
+      const existing = allGroups().find(g => g.name === name);
+      gid = existing ? existing.id : crypto.randomUUID();
+      if (!existing) {
+        pendingGroups[gid] = { id: gid, name };
+        rebuildBulkGroupSel();
+      }
+      inp.value = '';
+      inp.classList.remove('visible');
+    }
+
+    selRules.forEach(i => {
+      editedRules[i].groupId = gid || undefined;
+    });
+
+    rulesPage = 0;
+    renderRules();
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  UTILITIES
+// ════════════════════════════════════════════════════════════════════════
+
+function q(id) { return document.getElementById(id); }
+
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function trunc(p, max = 46) {
+  if (!p) return '';
+  return p.length <= max ? p : '…' + p.slice(-(max - 1));
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  BOOTSTRAP
+// ════════════════════════════════════════════════════════════════════════
+
+init();
+</script>
+</body>
+</html>

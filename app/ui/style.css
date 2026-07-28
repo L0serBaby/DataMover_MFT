@@ -1875,6 +1875,31 @@ table th.gsl-sorted { color: var(--accent); }
   color: var(--muted);
 }
 
+/* ── Feature toggles (Settings → Features) ──────────────────────────────── */
+.feature-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.feature-row + .feature-row { margin-top: 10px; }
+
+.feature-row-info { min-width: 0; }
+
+.feature-row-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.feature-row-toggle { flex-shrink: 0; }
+
 .btn-link-sm {
   background: none;
   border: none;
