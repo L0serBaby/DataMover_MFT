@@ -10,6 +10,7 @@ const logger  = require('./logger');
 const auth      = require('./auth');
 const scheduler = require('./scheduler');
 const { migrateCredentialStore } = require('./migrate-credentials');
+const { renameWithRetry } = require('./fs-utils');
 
 // Ensure data dir exists
 const DATA_DIR = path.join(__dirname, '../data');
@@ -170,7 +171,7 @@ function migratePgpKeys() {
       store[`pgp_armored_${record.id}`] = record.armoredKey;
       const tmp1 = credFile + '.tmp';
       fs.writeFileSync(tmp1, encryptCred(JSON.stringify(store)), 'utf8');
-      fs.renameSync(tmp1, credFile);
+      renameWithRetry(tmp1, credFile);
 
       // Verify the write
       const verify = JSON.parse(decryptCred(fs.readFileSync(credFile, 'utf8').trim()));
@@ -193,7 +194,7 @@ function migratePgpKeys() {
     try {
       const tmp2 = keysFile + '.tmp';
       fs.writeFileSync(tmp2, JSON.stringify(keys, null, 2), 'utf8');
-      fs.renameSync(tmp2, keysFile);
+      renameWithRetry(tmp2, keysFile);
     } catch (err) {
       logger.error(`[pgp-migrate] Failed to write updated pgp-keys.json: ${err.message}`);
     }

@@ -49,6 +49,7 @@ function clearCriticalBit(bytes, subpacketType) {
 
 const { encrypt: encryptCred, decrypt: decryptCred } = require('./crypto');
 const logger = require('./logger');
+const { renameWithRetry } = require('./fs-utils');
 
 // ── Data-dir overrides (test helper) ─────────────────────────────────────────
 
@@ -79,7 +80,7 @@ function writeKeys(keys) {
   });
   const tmp = _keysFile + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(safe, null, 2), 'utf8');
-  fs.renameSync(tmp, _keysFile);
+  renameWithRetry(tmp, _keysFile);
 }
 
 // ── Credential store ──────────────────────────────────────────────────────────
@@ -97,7 +98,7 @@ function readCredStore() {
 function writeCredStore(store) {
   const tmp = _credFile + '.tmp';
   fs.writeFileSync(tmp, encryptCred(JSON.stringify(store)), 'utf8');
-  fs.renameSync(tmp, _credFile);
+  renameWithRetry(tmp, _credFile);
 }
 
 function storePassphrase(ref, passphrase) {
@@ -196,7 +197,7 @@ async function decryptFile(inputPath, outputPath, privateKeyId, options = {}) {
   await fse.ensureDir(path.dirname(outputPath));
   const tmp = outputPath + '.pgptmp';
   fs.writeFileSync(tmp, Buffer.from(decrypted));
-  fs.renameSync(tmp, outputPath);
+  renameWithRetry(tmp, outputPath);
 
   const bytes = fs.statSync(outputPath).size;
   if (bytes === 0) throw new Error(`Decrypted output is empty: "${path.basename(outputPath)}"`);
@@ -249,7 +250,7 @@ async function encryptFile(inputPath, outputPath, publicKeyIds, options = {}) {
   await fse.ensureDir(path.dirname(outputPath));
   const tmp = outputPath + '.pgptmp';
   fs.writeFileSync(tmp, Buffer.from(encrypted));
-  fs.renameSync(tmp, outputPath);
+  renameWithRetry(tmp, outputPath);
 
   const bytes = fs.statSync(outputPath).size;
 

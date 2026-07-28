@@ -11,6 +11,7 @@ const { decrypt } = require('./crypto');
 const data        = require('./data');
 const logger      = require('./logger');
 const pgp         = require('./pgp');
+const { renameWithRetry } = require('./fs-utils');
 
 // Overridable via _setDataDir() for testing
 let _credFile = path.join(__dirname, '../data/credentials.enc');
@@ -294,7 +295,7 @@ async function copyFile(srcPath, destPath) {
   await fse.ensureDir(path.dirname(destPath));
   const tmp = destPath + '.tmp';
   await fse.copy(srcPath, tmp, { overwrite: true });
-  fs.renameSync(tmp, destPath);
+  renameWithRetry(tmp, destPath);
 }
 
 /**
@@ -403,7 +404,7 @@ async function sftpGetFile(client, remotePath, localDest, expectedSize) {
       `SFTP get size mismatch: expected=${expectedSize} got=${actual} path="${remotePath}"`
     );
   }
-  fs.renameSync(tmp, localDest);
+  renameWithRetry(tmp, localDest);
 }
 
 async function sftpPutFile(client, localSrc, remoteDest) {

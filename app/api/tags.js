@@ -5,6 +5,7 @@ const path   = require('path');
 const fs     = require('fs');
 const data   = require('../data');
 const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
+const { renameWithRetry } = require('../fs-utils');
 
 const CONFIG_FILE = path.join(__dirname, '../../data/config.json');
 
@@ -25,7 +26,7 @@ function readConfig() {
 function writeConfig(cfg) {
   const tmp = CONFIG_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
-  fs.renameSync(tmp, CONFIG_FILE);
+  renameWithRetry(tmp, CONFIG_FILE);
 }
 
 // ── GET /api/tags — all unique tags in use across rules + groups ──────────────

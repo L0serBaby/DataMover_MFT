@@ -3,6 +3,7 @@
 const path = require('path');
 const fs = require('fs');
 const lockfile = require('proper-lockfile');
+const { renameWithRetry } = require('./fs-utils');
 
 let DATA_DIR = path.join(__dirname, '../data');
 
@@ -97,30 +98,6 @@ async function append(filename, record, options = {}) {
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
-
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-// Windows Defender / search indexing can transiently hold a lock on a
-// just-written file for a few milliseconds, making rename() fail with
-// EPERM/EBUSY/EACCES even though nothing in this process is racing (the
-// per-file queue below already rules out same-process contention). This is
-// a real, known OS-level transient condition — retry with a short backoff
-// rather than failing the write outright.
-function renameWithRetry(tmpFile, destFile) {
-  const MAX_ATTEMPTS = 5;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      fs.renameSync(tmpFile, destFile);
-      return;
-    } catch (err) {
-      const transient = err.code === 'EPERM' || err.code === 'EBUSY' || err.code === 'EACCES';
-      if (!transient || attempt === MAX_ATTEMPTS) throw err;
-      sleepSync(20 * attempt);
-    }
-  }
-}
 
 function atomicWrite(file, data) {
   const tmp = file + '.tmp';

@@ -7,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const { deriveSessionSecret } = require('./crypto');
 const logger = require('./logger');
+const { renameWithRetry } = require('./fs-utils');
 
 const DATA_DIR = path.join(__dirname, '../data');
 const BCRYPT_ROUNDS = 12;
@@ -32,7 +33,7 @@ function loadUsers() {
 function saveUsers(users) {
   const tmp = _usersFile + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(users, null, 2), 'utf8');
-  fs.renameSync(tmp, _usersFile);
+  renameWithRetry(tmp, _usersFile);
 }
 
 function loadConfig() {
@@ -46,7 +47,7 @@ function loadConfig() {
 function saveConfig(cfg) {
   const tmp = _configFile + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
-  fs.renameSync(tmp, _configFile);
+  renameWithRetry(tmp, _configFile);
 }
 
 async function bootstrap() {

@@ -8,6 +8,7 @@ const path   = require('path');
 const auth   = require('../auth');
 const { requireAuth, requireAdmin, requireSetupComplete } = auth;
 const logger = require('../logger');
+const { renameWithRetry } = require('../fs-utils');
 
 // Overridable via _setUsersFile() for testing — never call in production
 let _usersFile = path.join(__dirname, '../../data/users.json');
@@ -65,7 +66,7 @@ function loadUsers() {
 function saveUsers(users) {
   const tmp = _usersFile + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(users, null, 2), 'utf8');
-  fs.renameSync(tmp, _usersFile);
+  renameWithRetry(tmp, _usersFile);
 }
 
 // Test helper — never call in production code

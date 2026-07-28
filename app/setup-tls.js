@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { execSync } = require('child_process');
 const forge  = require('node-forge');
 const logger = require('./logger');
+const { renameWithRetry } = require('./fs-utils');
 
 // Overridable via _setCertsDir() for testing — never call in production
 let CERTS_DIR = path.join(__dirname, '../certs');
@@ -118,8 +119,8 @@ function generateSelfSignedCert({ hostname, days = 3650, overwrite = false } = {
   const tmpKey  = keyPath()  + '.tmp';
   fs.writeFileSync(tmpCert, certPem, 'utf8');
   fs.writeFileSync(tmpKey,  privateKey, 'utf8');
-  fs.renameSync(tmpCert, certPath());
-  fs.renameSync(tmpKey,  keyPath());
+  renameWithRetry(tmpCert, certPath());
+  renameWithRetry(tmpKey,  keyPath());
 
   restrictPrivateKeyAcl(keyPath());
 
@@ -224,7 +225,7 @@ async function completeSetup({ port, currentPort, behindTlsProxy = false, config
 
   const tmp = configPath + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
-  fs.renameSync(tmp, configPath);
+  renameWithRetry(tmp, configPath);
 
   return { port: p, setupCompletedAt: cfg.SETUP_COMPLETED_AT };
 }

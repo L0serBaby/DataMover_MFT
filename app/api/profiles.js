@@ -11,6 +11,7 @@ const data                 = require('../data');
 const sshKeys              = require('../ssh-keys');
 const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
 const logger               = require('../logger');
+const { renameWithRetry }  = require('../fs-utils');
 
 const CRED_FILE = path.join(__dirname, '../../data/credentials.enc');
 
@@ -28,7 +29,7 @@ function readCredStore() {
 function writeCredStore(store) {
   const tmp = CRED_FILE + '.tmp';
   fs.writeFileSync(tmp, encrypt(JSON.stringify(store)), 'utf8');
-  fs.renameSync(tmp, CRED_FILE);
+  renameWithRetry(tmp, CRED_FILE);
 }
 
 function redact(profile) {

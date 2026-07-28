@@ -3,6 +3,7 @@
 const fs     = require('fs');
 const logger = require('./logger');
 const { encrypt, decrypt } = require('./crypto');
+const { renameWithRetry } = require('./fs-utils');
 
 /**
  * Re-encrypts a credentials.enc store to the current (v2) format.
@@ -80,7 +81,7 @@ function migrateCredentialStore({ credFile }) {
       }
     }
 
-    fs.renameSync(tmp, credFile);
+    renameWithRetry(tmp, credFile);
   } catch (err) {
     try { fs.unlinkSync(tmp); } catch { /* best-effort cleanup */ }
     logger.error(`[cred-migrate] Migration failed — leaving original untouched: ${err.message}`);

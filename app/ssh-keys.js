@@ -7,6 +7,7 @@ const forge  = require('node-forge');
 
 const { encrypt, decrypt } = require('./crypto');
 const data                 = require('./data');
+const { renameWithRetry }  = require('./fs-utils');
 
 const CRED_FILE = path.join(__dirname, '../data/credentials.enc');
 
@@ -24,7 +25,7 @@ function readCredStore() {
 function writeCredStore(store) {
   const tmp = CRED_FILE + '.tmp';
   fs.writeFileSync(tmp, encrypt(JSON.stringify(store)), 'utf8');
-  fs.renameSync(tmp, CRED_FILE);
+  renameWithRetry(tmp, CRED_FILE);
 }
 
 // ── Fingerprint calculation ───────────────────────────────────────────────────

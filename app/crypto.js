@@ -5,6 +5,7 @@ const fs     = require('fs');
 const path   = require('path');
 const { execSync } = require('child_process');
 const logger = require('./logger');
+const { renameWithRetry } = require('./fs-utils');
 
 const ROOT_DIR = path.join(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
@@ -132,7 +133,7 @@ function loadOrCreateMasterKey() {
   fs.mkdirSync(path.dirname(keyPath), { recursive: true });
   const tmp = keyPath + '.tmp';
   fs.writeFileSync(tmp, key);
-  fs.renameSync(tmp, keyPath);
+  renameWithRetry(tmp, keyPath);
   restrictMasterKeyAcl(keyPath);
   logger.info(`[crypto] Master key generated at ${keyPath}`);
   return key;
