@@ -1667,9 +1667,9 @@ VIEWS.profiles = function(el) {
   }
 
   function addr(p) {
-    return p.type === 'sftp'
-      ? `${p.username||''}@${p.host||'—'}:${p.port||22}`
-      : (p.path || p.remotePath || '—');
+    if (p.type === 'sftp') return `${p.username||''}@${p.host||'—'}:${p.port||22}`;
+    if (p.type === 'azure-blob') return `${p.container||'—'}${p.prefix ? '/'+p.prefix : ''}`;
+    return p.path || p.remotePath || '—';
   }
 
   const SORT_ACCESSORS = {
@@ -1779,7 +1779,7 @@ VIEWS.profiles = function(el) {
         </button>
       </td>
       <td style="font-weight:500">${esc(p.name)}</td>
-      <td><span class="badge ${p.type==='sftp'?'badge-accent':'badge-muted'}">${esc((p.type||'local').toUpperCase())}</span></td>
+      <td><span class="badge ${p.type==='sftp'?'badge-accent':p.type==='azure-blob'?'badge-success':'badge-muted'}">${esc((p.type||'local').toUpperCase())}</span></td>
       <td class="font-mono text-sm text-muted" style="max-width:340px">
         <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;max-width:calc(100% - 22px);vertical-align:middle" title="${esc(a)}">${esc(a)}</span>
         ${copyBtnHTML(a)}
@@ -1814,7 +1814,11 @@ VIEWS.profiles = function(el) {
       testResults.set(id, {
         ok:  data.ok,
         msg: data.ok
-          ? (data.files != null ? `${data.files} files listed` : 'Connected')
+          ? (data.sampled != null
+              ? `${data.sampled} blob(s) sampled` + (data.sas
+                  ? `, SAS ${data.sas.notYetValid ? 'not yet valid' : data.sas.daysRemaining != null ? data.sas.daysRemaining + 'd remaining' : 'expiry unknown'}`
+                  : '')
+              : (data.files != null ? `${data.files} files listed` : 'Connected'))
           : (data.error || 'Failed'),
       });
     } catch (err) {
@@ -1859,6 +1863,28 @@ VIEWS.profiles = function(el) {
 
     const useKeyAuth = p.authType === 'key';
 
+    // Azure Blob: persistent status line for the currently-saved SAS token
+    // (edit mode only) — distinct from the transient preview of whatever is
+    // currently typed into #pm-blob-sas (see updateBlobSasPreview below).
+    function fmtSasStatusLine(sasMeta) {
+      if (!sasMeta) return '';
+      const permsText = sasMeta.permissions || '—';
+      if (!sasMeta.expiresAt) {
+        return `<div class="field-hint text-danger">Current token: unknown — policy-backed, no expiry recorded · permissions ${esc(permsText)}</div>`;
+      }
+      const days    = Math.floor((new Date(sasMeta.expiresAt).getTime() - Date.now()) / 86400000);
+      const cls     = days < 0 ? 'text-danger' : 'text-muted';
+      const dateStr = new Date(sasMeta.expiresAt).toLocaleDateString();
+      return `<div class="field-hint ${cls}">Current token: expires ${esc(dateStr)} (${days}${days < 0 ? 'd ago' : 'd remaining'}) · permissions ${esc(permsText)}</div>`;
+    }
+    const sasStatusHtml = fmtSasStatusLine(p.sasMeta);
+
+    const wizardDefaultExpiry = (() => {
+      const d = new Date();
+      d.setFullYear(d.getFullYear() + 1);
+      return d.toISOString().slice(0, 10);
+    })();
+
     const bodyEl = document.createElement('div');
     bodyEl.innerHTML = `
       <div class="grid-2">
@@ -1869,13 +1895,14 @@ VIEWS.profiles = function(el) {
         <div class="field">
           <label>Type</label>
           <select id="pm-type">
-            <option value="smb"   ${p.type==='smb'  ?'selected':''}>SMB / UNC</option>
-            <option value="local" ${p.type==='local' ?'selected':''}>Local path</option>
-            <option value="sftp"  ${p.type==='sftp'  ?'selected':''}>SFTP</option>
+            <option value="smb"        ${p.type==='smb'       ?'selected':''}>SMB / UNC</option>
+            <option value="local"      ${p.type==='local'     ?'selected':''}>Local path</option>
+            <option value="sftp"       ${p.type==='sftp'      ?'selected':''}>SFTP</option>
+            <option value="azure-blob" ${p.type==='azure-blob'?'selected':''}>Azure Blob</option>
           </select>
         </div>
       </div>
-      <div id="pm-smb" ${p.type==='sftp'?'class="hidden"':''}>
+      <div id="pm-smb" ${(p.type==='sftp'||p.type==='azure-blob')?'class="hidden"':''}>
         <div class="field">
           <label>Path</label>
           <input id="pm-path" type="text" placeholder="\\\\server\\share\\folder or C:\\data" value="${esc(p.path||'')}">
@@ -1916,18 +1943,181 @@ VIEWS.profiles = function(el) {
         <div class="field"><label>Remote path</label>
           <input id="pm-rpath" type="text" placeholder="/outbound" value="${esc(p.remotePath||'')}"></div>
       </div>
+      <div id="pm-azure-blob" ${p.type!=='azure-blob'?'class="hidden"':''}>
+        <div class="field">
+          <label>Blob endpoint</label>
+          <input id="pm-blob-endpoint" type="text" placeholder="https://account.blob.core.windows.net" value="${esc(p.blobEndpoint||'')}">
+        </div>
+        <div class="grid-2">
+          <div class="field"><label>Container</label>
+            <input id="pm-blob-container" type="text" value="${esc(p.container||'')}"></div>
+          <div class="field"><label>Prefix</label>
+            <input id="pm-blob-prefix" type="text" placeholder="inbound/ (optional, blank = container root)" value="${esc(p.prefix||'')}"></div>
+        </div>
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:6px;font-weight:400;cursor:pointer">
+            <input id="pm-blob-recursive" type="checkbox" ${p.recursive?'checked':''} style="width:auto">
+            List nested blobs (recursive)
+          </label>
+        </div>
+        <div class="field">
+          <label>Archive mode</label>
+          <select id="pm-blob-archive-mode">
+            <option value="auto"        ${(p.archiveMode||'auto')==='auto'      ?'selected':''}>Auto — recommended</option>
+            <option value="rename"      ${p.archiveMode==='rename'              ?'selected':''}>Force atomic rename</option>
+            <option value="copy-delete" ${p.archiveMode==='copy-delete'         ?'selected':''}>Force copy+delete</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>SAS token</label>
+          <input id="pm-blob-sas" type="password" autocomplete="new-password"
+            placeholder="${p.credentialRef ? '(stored — blank = keep)' : 'Paste SAS token'}">
+        </div>
+        <div id="pm-blob-sas-expiry-row" class="field hidden">
+          <label>Expiry (required — this token has no readable expiry)</label>
+          <input id="pm-blob-sas-expiry" type="date">
+        </div>
+        <div id="pm-blob-sas-preview" class="field-hint hidden" style="margin:-10px 0 12px"></div>
+        ${sasStatusHtml}
+        <div class="field" style="margin-top:2px">
+          <a id="pm-wizard-toggle" href="#" class="text-accent text-sm" style="text-decoration:none">Generate SAS checklist ▾</a>
+        </div>
+        <div id="pm-wizard-body" class="hidden" style="padding:12px;background:var(--surface-2);border-radius:var(--radius);margin-bottom:12px">
+          <div class="grid-2">
+            <div class="field" style="margin-bottom:10px">
+              <label>Intended role</label>
+              <select id="pm-wizard-role">
+                <option value="full">Source + Destination + Archive</option>
+                <option value="srcCopy">Source, copy only</option>
+                <option value="srcMoveDelete">Source, move/delete</option>
+                <option value="destOnly">Destination only</option>
+              </select>
+            </div>
+            <div class="field" style="margin-bottom:10px">
+              <label>Expiry</label>
+              <input id="pm-wizard-expiry" type="date" value="${wizardDefaultExpiry}">
+            </div>
+          </div>
+          <div id="pm-wizard-checklist"></div>
+        </div>
+      </div>
       <div id="pm-err" class="alert alert-error hidden"></div>`;
 
     bodyEl.querySelector('#pm-type').addEventListener('change', e => {
-      const sftp = e.target.value === 'sftp';
-      bodyEl.querySelector('#pm-sftp').classList.toggle('hidden', !sftp);
-      bodyEl.querySelector('#pm-smb') .classList.toggle('hidden',  sftp);
+      const val = e.target.value;
+      bodyEl.querySelector('#pm-sftp')      .classList.toggle('hidden', val !== 'sftp');
+      bodyEl.querySelector('#pm-azure-blob').classList.toggle('hidden', val !== 'azure-blob');
+      bodyEl.querySelector('#pm-smb')       .classList.toggle('hidden', val === 'sftp' || val === 'azure-blob');
     });
 
     bodyEl.querySelector('#pm-auth-type')?.addEventListener('change', e => {
       const keyAuth = e.target.value === 'key';
       bodyEl.querySelector('#pm-pass-row').style.display = keyAuth ? 'none' : '';
       bodyEl.querySelector('#pm-key-row') .style.display = keyAuth ? ''     : 'none';
+    });
+
+    // ── Azure Blob: instant client-side preview of a freshly-pasted SAS ──────
+    // Convenience hint only — executor.js's parseSasToken is the authoritative
+    // validator on save. Mirrors its leading-URL/leading-"?" stripping
+    // independently (client-side, not a shared code path).
+    function updateBlobSasPreview() {
+      const input     = bodyEl.querySelector('#pm-blob-sas');
+      const previewEl = bodyEl.querySelector('#pm-blob-sas-preview');
+      const expiryRow = bodyEl.querySelector('#pm-blob-sas-expiry-row');
+      if (!input) return;
+      const raw = input.value.trim();
+      if (!raw) {
+        previewEl.classList.add('hidden');
+        expiryRow.classList.add('hidden');
+        return;
+      }
+
+      let stripped = raw;
+      const urlMatch = /^https?:\/\/[^?]*\?(.*)$/i.exec(stripped);
+      if (urlMatch) stripped = urlMatch[1];
+      stripped = stripped.replace(/^\?/, '');
+
+      const params = new URLSearchParams(stripped);
+      const se = params.get('se');
+      const si = params.get('si');
+      const sp = params.get('sp');
+      const sr = params.get('sr');
+
+      if (se) {
+        expiryRow.classList.add('hidden');
+        previewEl.classList.remove('hidden');
+        previewEl.classList.remove('text-danger');
+        const d = new Date(se);
+        const dateStr = isNaN(d) ? se : d.toLocaleString();
+        previewEl.innerHTML = `Parsed: expires ${esc(dateStr)} · permissions <code>${esc(sp||'—')}</code> · resource <code>${esc(sr||'—')}</code>`;
+      } else if (si) {
+        previewEl.classList.add('hidden');
+        expiryRow.classList.remove('hidden');
+      } else {
+        expiryRow.classList.add('hidden');
+        previewEl.classList.remove('hidden');
+        previewEl.classList.add('text-danger');
+        previewEl.textContent = "No expiry (se) or policy (si) found — this doesn't look like a valid SAS query string";
+      }
+    }
+    bodyEl.querySelector('#pm-blob-sas')?.addEventListener('input', updateBlobSasPreview);
+    bodyEl.querySelector('#pm-blob-sas')?.addEventListener('blur',  updateBlobSasPreview);
+
+    // ── Azure Blob: Portal SAS-generation checklist (§7) — instructional
+    // only. Submits nothing, calls no API; the operator works through the
+    // Portal separately and pastes the result into #pm-blob-sas above.
+    const WIZARD_ROLES = {
+      full:          { perms: ['Read','Add','Create','Write','Delete','List','Move','Execute'] },
+      srcCopy:       { perms: ['Read','List'] },
+      srcMoveDelete: { perms: ['Read','List','Delete'] },
+      destOnly:      { perms: ['Read','Add','Create','Write'] },
+    };
+    const WIZARD_ALL_PERMS = ['Read','Add','Create','Write','Delete','List','Move','Execute'];
+
+    function renderWizardChecklist() {
+      const checklistEl = bodyEl.querySelector('#pm-wizard-checklist');
+      if (!checklistEl) return;
+      const roleKey    = bodyEl.querySelector('#pm-wizard-role').value;
+      const role       = WIZARD_ROLES[roleKey] || WIZARD_ROLES.full;
+      const expiry     = bodyEl.querySelector('#pm-wizard-expiry').value;
+      const container  = bodyEl.querySelector('#pm-blob-container').value.trim() || '(enter a container name above first)';
+      const expiryStr  = expiry ? new Date(`${expiry}T00:00:00`).toLocaleDateString() : '(pick a date above)';
+
+      const permRows = WIZARD_ALL_PERMS.map(label =>
+        `<li>${role.perms.includes(label) ? '☑' : '☐'} ${esc(label)}</li>`
+      ).join('');
+
+      checklistEl.innerHTML = `
+        <div class="text-sm" style="line-height:1.8">
+          <div><strong>Container:</strong> ${esc(container)} <span class="text-muted">(displayed only — confirms you're in the right blade)</span></div>
+          <div style="margin-top:8px"><strong>Signing method:</strong> Account key <span class="text-danger">— not User delegation key</span></div>
+          <div style="margin-top:8px"><strong>Permissions:</strong>
+            <ul style="margin:4px 0 0;padding-left:0;list-style:none;columns:2">${permRows}</ul>
+          </div>
+          <div style="margin-top:8px"><strong>Start:</strong> leave default, or today</div>
+          <div><strong>Expiry:</strong> ${esc(expiryStr)}</div>
+          <div><strong>Allowed IP addresses:</strong> leave blank, unless pinning egress IP</div>
+          <div><strong>Allowed protocols:</strong> HTTPS only — confirm, don't leave at "HTTPS and HTTP"</div>
+          <div><strong>Signing key:</strong> Key1 <span class="text-muted">(or Key2 — your choice)</span></div>
+        </div>
+        <div class="field-hint" style="margin-top:12px;line-height:1.6">
+          <div>⚠ <strong>Signing method must be Account key.</strong> Microsoft's own walkthrough for this blade defaults its example to User delegation key, which silently caps expiry at 7 days regardless of what you enter — change it first, or every other value here is moot.</div>
+          <div style="margin-top:6px">Record whichever signing key (Key1/Key2) you pick somewhere for rotation-tracking — rotating that key invalidates every SAS signed with it. DataMover does not persist this yet (no <code>signingKey</code> field wired into profile save).</div>
+          <div style="margin-top:6px">After generating: copy the <strong>Blob SAS token</strong> field, not the <strong>Blob SAS URL</strong> field, into the field above. (DataMover's parser now tolerates a mis-pasted URL as a fallback, but the token field is the correct one.)</div>
+        </div>`;
+    }
+
+    bodyEl.querySelector('#pm-wizard-toggle')?.addEventListener('click', e => {
+      e.preventDefault();
+      const section  = bodyEl.querySelector('#pm-wizard-body');
+      const isHidden = section.classList.toggle('hidden');
+      e.currentTarget.textContent = `Generate SAS checklist ${isHidden ? '▾' : '▴'}`;
+      if (!isHidden) renderWizardChecklist();
+    });
+    bodyEl.querySelector('#pm-wizard-role')?.addEventListener('change', renderWizardChecklist);
+    bodyEl.querySelector('#pm-wizard-expiry')?.addEventListener('change', renderWizardChecklist);
+    bodyEl.querySelector('#pm-blob-container')?.addEventListener('input', () => {
+      if (!bodyEl.querySelector('#pm-wizard-body').classList.contains('hidden')) renderWizardChecklist();
     });
 
     const footEl = document.createElement('div');
@@ -1963,6 +2153,25 @@ VIEWS.profiles = function(el) {
           if (pw) payload.password = pw;
         }
         if (!payload.host) { errEl.textContent = 'Host is required for SFTP.'; errEl.classList.remove('hidden'); return; }
+      } else if (type === 'azure-blob') {
+        payload.blobEndpoint = bodyEl.querySelector('#pm-blob-endpoint')  .value.trim();
+        payload.container    = bodyEl.querySelector('#pm-blob-container').value.trim();
+        payload.prefix        = bodyEl.querySelector('#pm-blob-prefix')   .value.trim();
+        payload.recursive     = bodyEl.querySelector('#pm-blob-recursive').checked;
+        payload.archiveMode   = bodyEl.querySelector('#pm-blob-archive-mode').value;
+
+        const sasToken = bodyEl.querySelector('#pm-blob-sas').value;
+        if (sasToken) payload.sasToken = sasToken;
+
+        const expiryRow = bodyEl.querySelector('#pm-blob-sas-expiry-row');
+        if (!expiryRow.classList.contains('hidden')) {
+          const expiryVal = bodyEl.querySelector('#pm-blob-sas-expiry').value;
+          if (expiryVal) payload.sasExpiresAt = new Date(`${expiryVal}T00:00:00Z`).toISOString();
+        }
+
+        if (!payload.blobEndpoint) { errEl.textContent = 'Blob endpoint is required.'; errEl.classList.remove('hidden'); return; }
+        if (!payload.container)    { errEl.textContent = 'Container is required.';     errEl.classList.remove('hidden'); return; }
+        if (isNew && !sasToken)    { errEl.textContent = 'SAS token is required.';      errEl.classList.remove('hidden'); return; }
       } else {
         payload.path = bodyEl.querySelector('#pm-path').value.trim();
         if (!payload.path) { errEl.textContent = 'Path is required.'; errEl.classList.remove('hidden'); return; }
@@ -5151,8 +5360,13 @@ async function openFolderBrowser(profileId, startPath, onSelect) {
   const prof = profiles.find(p => p.id === profileId);
   if (!prof) return;
 
-  let browsePath = startPath || prof.remotePath || prof.path || '/';
-  const bodyEl   = document.createElement('div');
+  let browsePath = startPath ?? (
+    prof.type === 'sftp'       ? (prof.remotePath || '/') :
+    prof.type === 'azure-blob' ? (prof.prefix || '') :
+                                  (prof.path || '/')
+  );
+  const isBlob = prof.type === 'azure-blob';
+  const bodyEl = document.createElement('div');
 
   async function loadListing() {
     bodyEl.innerHTML = '<div class="loading-center" style="min-height:140px"><div class="spinner"></div></div>';
@@ -5177,11 +5391,23 @@ async function openFolderBrowser(profileId, startPath, onSelect) {
         </div>`;
 
       document.getElementById('fb-up')?.addEventListener('click', () => {
-        const has  = browsePath.includes('\\');
-        const sep  = has ? '\\' : '/';
-        const trim = browsePath.replace(/[/\\]+$/, '');
-        const up   = trim.slice(0, Math.max(trim.lastIndexOf('/'), trim.lastIndexOf('\\')));
-        if (up && up !== trim) { browsePath = up; loadListing(); }
+        if (isBlob) {
+          // No leading separator in blob's own convention (resolveBlobPrefix
+          // never has one) — the sftp/local branch's `if (up && ...)` guard
+          // requires a truthy result, which is correct for them (their root
+          // is never empty) but would wrongly block navigating to blob's
+          // empty-string root if reused here.
+          const trimmed = browsePath.replace(/\/+$/, '');
+          const idx = trimmed.lastIndexOf('/');
+          const up  = idx === -1 ? '' : trimmed.slice(0, idx);
+          if (up !== browsePath) { browsePath = up; loadListing(); }
+        } else {
+          const has  = browsePath.includes('\\');
+          const sep  = has ? '\\' : '/';
+          const trim = browsePath.replace(/[/\\]+$/, '');
+          const up   = trim.slice(0, Math.max(trim.lastIndexOf('/'), trim.lastIndexOf('\\')));
+          if (up && up !== trim) { browsePath = up; loadListing(); }
+        }
       });
 
       bodyEl.querySelectorAll('.fb-dir').forEach(row => {
@@ -5190,8 +5416,12 @@ async function openFolderBrowser(profileId, startPath, onSelect) {
           row.classList.add('selected');
         });
         row.addEventListener('dblclick', () => {
-          const sep  = browsePath.includes('\\') ? '\\' : '/';
-          browsePath = browsePath.replace(/[/\\]+$/, '') + sep + row.dataset.name;
+          if (isBlob) {
+            browsePath = browsePath ? `${browsePath.replace(/\/+$/, '')}/${row.dataset.name}` : row.dataset.name;
+          } else {
+            const sep  = browsePath.includes('\\') ? '\\' : '/';
+            browsePath = browsePath.replace(/[/\\]+$/, '') + sep + row.dataset.name;
+          }
           loadListing();
         });
       });
@@ -5209,7 +5439,28 @@ async function openFolderBrowser(profileId, startPath, onSelect) {
   await loadListing();
 
   footEl.querySelector('#fb-cancel').addEventListener('click', close);
-  footEl.querySelector('#fb-select').addEventListener('click', () => { onSelect(browsePath); close(); });
+  footEl.querySelector('#fb-select').addEventListener('click', () => {
+    // resolveBlobPrefix (already shipped, unchanged) treats a rulePath
+    // starting with "/" as an absolute override of profile.prefix, and one
+    // with no leading slash as RELATIVE, joined onto profile.prefix.
+    // Browsing for an azure-blob profile starts already inside
+    // profile.prefix (see the browsePath init above) and navigates in
+    // prefix-relative terms, so by the time "Select this folder" is
+    // clicked, browsePath is already the full effective path from the
+    // container root. Returned as-is (blob's own convention has no leading
+    // slash) resolveBlobPrefix would treat it as relative and join it onto
+    // profile.prefix A SECOND TIME — "inbound/inbound/subdir" the first
+    // time the resulting rule runs. The leading "/" added here exists
+    // purely to trigger resolveBlobPrefix's absolute-override branch, the
+    // same way sftp/local browsers' native leading-separator paths already
+    // do; browsePath itself must stay slash-less internally, since that's
+    // what's sent as the `?path=` query param on every browse call and what
+    // profiles.js's browse-confinement check compares against
+    // profile.prefix. Do not "simplify" this away — it looks redundant
+    // until you trace resolveBlobPrefix's two branches.
+    onSelect(isBlob ? '/' + browsePath : browsePath);
+    close();
+  });
 }
 
 /** Format bytes to human-readable string. */

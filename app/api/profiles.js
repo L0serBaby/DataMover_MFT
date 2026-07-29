@@ -12,6 +12,10 @@ const sshKeys              = require('../ssh-keys');
 const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
 const logger               = require('../logger');
 const { renameWithRetry }  = require('../fs-utils');
+const {
+  parseSasToken, redactSas, getBlobContainerClient, blobListFiles,
+  classifySasExpiry, _getAzureBlobSasWarnDays,
+} = require('../executor');
 
 const CRED_FILE = path.join(__dirname, '../../data/credentials.enc');
 
@@ -35,7 +39,34 @@ function writeCredStore(store) {
 function redact(profile) {
   const safe = { ...profile };
   delete safe.password;
+  delete safe.sasToken;
+  if (safe.type === 'azure-blob') {
+    const { status, daysRemaining } = classifySasExpiry(safe.sasMeta?.expiresAt, _getAzureBlobSasWarnDays());
+    safe.sasStatus        = status;
+    safe.sasDaysRemaining = daysRemaining;
+  }
   return safe;
+}
+
+// ── Azure Blob SAS helpers ──────────────────────────────────────────────────────
+
+// Translates sp permission letters into what DataMover can actually do with
+// this SAS, per spec §3.5 — catches a read-only SAS at profile-save/test time
+// rather than at 2am during a delivery.
+function sasCapabilities(sp) {
+  const perms   = new Set((sp || '').split(''));
+  const hasAll  = (...letters) => letters.every(l => perms.has(l));
+  const caps    = [];
+  if (hasAll('r', 'l'))                caps.push('source-copy');
+  if (hasAll('r', 'l', 'd'))            caps.push('source-move');
+  if (hasAll('r', 'l', 'c', 'w', 'd'))  caps.push('source-archive');
+  if (hasAll('r', 'c', 'w'))            caps.push('destination');
+  return caps;
+}
+
+function sasDaysRemaining(expiresAt) {
+  if (!expiresAt) return null;
+  return Math.floor((new Date(expiresAt).getTime() - Date.now()) / 86400000);
 }
 
 // ── SFTP connect helper (connect, run fn, always end) ─────────────────────────
@@ -73,7 +104,7 @@ router.get('/', (req, res) => {
 // POST /api/profiles
 router.post('/', requireAdmin, async (req, res) => {
   try {
-    const { password, ...body } = req.body || {};
+    const { password, sasToken, sasExpiresAt, ...body } = req.body || {};
     if (!body.name) return res.status(400).json({ error: 'name is required' });
     if (!body.type) return res.status(400).json({ error: 'type is required' });
 
@@ -94,6 +125,22 @@ router.post('/', requireAdmin, async (req, res) => {
         store[ref] = password;
         writeCredStore(store);
       }
+    } else if (profile.type === 'azure-blob' && sasToken) {
+      let sasMeta;
+      try {
+        sasMeta = parseSasToken(sasToken);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      if (sasMeta.source === 'manual' && sasExpiresAt) {
+        sasMeta.expiresAt = new Date(sasExpiresAt).toISOString();
+      }
+      const ref = profile.credentialRef || `azureblob_${profile.id}`;
+      profile.credentialRef = ref;
+      const store = readCredStore();
+      store[ref] = sasToken;
+      writeCredStore(store);
+      profile.sasMeta = sasMeta;
     }
 
     const profiles = data.read('profiles.json');
@@ -112,7 +159,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
     const idx = profiles.findIndex(p => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'Profile not found' });
 
-    const { password, ...body } = req.body || {};
+    const { password, sasToken, sasExpiresAt, ...body } = req.body || {};
     const existing = profiles[idx];
     const updated  = { ...existing, ...body, id: existing.id };
 
@@ -127,6 +174,22 @@ router.put('/:id', requireAdmin, async (req, res) => {
         store[ref] = password;
         writeCredStore(store);
       }
+    } else if (updated.type === 'azure-blob' && sasToken) {
+      let sasMeta;
+      try {
+        sasMeta = parseSasToken(sasToken);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      if (sasMeta.source === 'manual' && sasExpiresAt) {
+        sasMeta.expiresAt = new Date(sasExpiresAt).toISOString();
+      }
+      const ref = updated.credentialRef || `azureblob_${updated.id}`;
+      updated.credentialRef = ref;
+      const store = readCredStore();
+      store[ref] = sasToken;
+      writeCredStore(store);
+      updated.sasMeta = sasMeta;
     }
 
     profiles[idx] = updated;
@@ -185,14 +248,38 @@ router.post('/:id/test', requireAdmin, async (req, res) => {
       });
       logger.info(`[api/profiles] Test OK — "${profile.name}" (sftp) files=${count}`);
       res.json({ ok: true, files: count });
+    } else if (profile.type === 'azure-blob') {
+      const containerClient = getBlobContainerClient(profile);
+      // Sampled, not a full inventory — a real container can hold far too
+      // many blobs to enumerate just to prove connectivity, and this used to
+      // have no cap at all.
+      const sampled = await blobListFiles(containerClient, profile.prefix, null, null, false, 5);
+      const sasMeta = profile.sasMeta || {};
+      logger.info(`[api/profiles] Test OK — "${profile.name}" (azure-blob) sampled=${sampled.length}`);
+      res.json({
+        ok:      true,
+        sampled: sampled.length,
+        sas: {
+          expiresAt:     sasMeta.expiresAt || null,
+          daysRemaining: sasDaysRemaining(sasMeta.expiresAt),
+          status:        classifySasExpiry(sasMeta.expiresAt, _getAzureBlobSasWarnDays()).status,
+          permissions:   sasMeta.permissions || null,
+          capabilities:  sasCapabilities(sasMeta.permissions),
+          notYetValid:   Boolean(sasMeta.startsAt && new Date(sasMeta.startsAt) > new Date()),
+        },
+      });
     } else {
       const stat = fs.statSync(profile.path);
       logger.info(`[api/profiles] Test OK — "${profile.name}" (${profile.type}) isDirectory=${stat.isDirectory()}`);
       res.json({ ok: true, isDirectory: stat.isDirectory() });
     }
   } catch (err) {
-    logger.warn(`[api/profiles] Test failed — "${profile.name}": ${err.message}`);
-    res.status(400).json({ ok: false, error: err.message });
+    let message = redactSas(err.message);
+    if (profile.type === 'azure-blob') {
+      message += ' (hint: check that the SAS token has not expired, and that HTTP_PROXY/HTTPS_PROXY are not set for the service account in a way that hijacks private-endpoint traffic)';
+    }
+    logger.warn(`[api/profiles] Test failed — "${profile.name}": ${message}`);
+    res.status(400).json({ ok: false, error: message });
   }
 });
 
@@ -204,12 +291,17 @@ router.get('/:id/browse', requireAdmin, async (req, res) => {
   const rawPath    = req.query.path || '';
   const profileBase = profile.type === 'sftp'
     ? (profile.remotePath || '/')
-    : (profile.path       || '');
+    : profile.type === 'azure-blob'
+      ? (profile.prefix || '')
+      : (profile.path   || '');
 
-  const browsePath = rawPath || profileBase || '.';
+  // azure-blob has no filesystem-style "." root — an empty prefix means "the
+  // whole container", not "current directory".
+  const browsePath = rawPath || profileBase || (profile.type === 'azure-blob' ? '' : '.');
 
-  // For local/SMB profiles: confine browsing to within the profile's configured root.
-  // This prevents authenticated users from enumerating arbitrary server paths.
+  // For local/SMB/azure-blob profiles: confine browsing to within the profile's
+  // configured root. This prevents authenticated users from enumerating
+  // arbitrary server paths or container prefixes.
   if (profile.type !== 'sftp' && profileBase) {
     const normalizeP = p => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
     const normBase    = normalizeP(profileBase);
@@ -231,6 +323,23 @@ router.get('/:id/browse', requireAdmin, async (req, res) => {
         size:     e.size,
         modified: e.modifyTime,
       })));
+    } else if (profile.type === 'azure-blob') {
+      const containerClient = getBlobContainerClient(profile);
+      const prefixArg = browsePath ? (browsePath.endsWith('/') ? browsePath : `${browsePath}/`) : '';
+      const entries = [];
+      for await (const item of containerClient.listBlobsByHierarchy('/', prefixArg ? { prefix: prefixArg } : {})) {
+        if (item.kind === 'prefix') {
+          entries.push({ name: path.posix.basename(item.name.replace(/\/$/, '')), type: 'directory' });
+        } else {
+          entries.push({
+            name:     path.posix.basename(item.name),
+            type:     'file',
+            size:     item.properties.contentLength,
+            modified: item.properties.lastModified,
+          });
+        }
+      }
+      res.json(entries);
     } else {
       const entries = fs.readdirSync(browsePath, { withFileTypes: true });
       res.json(entries.map(e => ({
@@ -239,7 +348,7 @@ router.get('/:id/browse', requireAdmin, async (req, res) => {
       })));
     }
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(400).json({ error: redactSas(err.message) });
   }
 });
 

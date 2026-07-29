@@ -9,7 +9,9 @@ const logger = require('./logger');
 const pgp    = require('./pgp');
 
 // Internal transferRule reference — replaced by _setTransferRule() in tests
-let _transferRule = require('./executor').transferRule;
+const _executorModule = require('./executor');
+let _transferRule = _executorModule.transferRule;
+const { classifySasExpiry, _getAzureBlobSasWarnDays } = _executorModule;
 
 // ── Schedule timezone ───────────────────────────────────────────────────────
 // Cron expressions are ambiguous without an explicit IANA timezone — node-cron
@@ -37,6 +39,13 @@ const _cronTasks = new Map();  // ruleId → ScheduledTask
 const _running   = new Map();  // ruleId → Promise<jobResult>
 let _shuttingDown    = false;
 let _sigtermHandled  = false;
+
+// Separate, non-rule cron task — deliberately NOT keyed into _cronTasks.
+// That Map is rule-ID-keyed, and _cancelCron/reloadAll's cancel-loop plus
+// getRunningJobs are all rule-semantics-specific; mixing a non-rule task in
+// risks it being silently wiped by reloadAll() or misreported by those
+// functions.
+let _azureBlobExpiryTask = null;
 
 // ── Chain node execution ──────────────────────────────────────────────────────
 
@@ -188,6 +197,61 @@ function _cancelCron(ruleId) {
   }
 }
 
+// ── Azure Blob SAS expiry check (§6.3) ─────────────────────────────────────────
+// Daily, non-rule cron task. Walks every azure-blob profile, recomputes
+// days-remaining via the shared classifier (same logic as transferRule's
+// pre-flight and the profiles API — see app/executor.js), and emits
+// logger.warn/.error lines in the existing "[scheduler] ..." style. This is
+// what log-monitoring tooling can alert on; DataMover has no email/SMTP
+// subsystem and isn't gaining one here (§6.3).
+
+async function _checkAzureBlobSasExpiry() {
+  const warnDays = _getAzureBlobSasWarnDays();
+  const profiles = data.read('profiles.json').filter(p => p.type === 'azure-blob');
+  for (const p of profiles) {
+    const { status, daysRemaining } = classifySasExpiry(p.sasMeta?.expiresAt, warnDays);
+    if (status === 'unknown') {
+      logger.warn(`[scheduler] Azure Blob SAS: profile "${p.name}" has no recorded ` +
+        `expiry (policy-backed/manual) — cannot verify remaining validity`);
+    } else if (status === 'expired') {
+      logger.error(`[scheduler] Azure Blob SAS EXPIRED — profile "${p.name}" expired ` +
+        `${Math.abs(daysRemaining)}d ago (${p.sasMeta.expiresAt})`);
+    } else if (status === 'critical') {
+      logger.error(`[scheduler] Azure Blob SAS expiring imminently — profile "${p.name}" ` +
+        `has ${daysRemaining}d remaining (expires ${p.sasMeta.expiresAt})`);
+    } else if (status === 'warn') {
+      logger.warn(`[scheduler] Azure Blob SAS renewal reminder — profile "${p.name}" ` +
+        `has ${daysRemaining}d remaining (expires ${p.sasMeta.expiresAt})`);
+    }
+    // 'ok': no log line.
+  }
+}
+
+function _getAzureBlobSasCheckCron() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    if (cfg.AZURE_BLOB_SAS_CHECK_CRON && cron.validate(cfg.AZURE_BLOB_SAS_CHECK_CRON)) {
+      return cfg.AZURE_BLOB_SAS_CHECK_CRON;
+    }
+  } catch {}
+  return '0 7 * * *';
+}
+
+function _registerAzureBlobExpiryCheck() {
+  if (_azureBlobExpiryTask) { _azureBlobExpiryTask.stop(); _azureBlobExpiryTask = null; }
+  const tz   = _getScheduleTimezone();
+  const opts = { scheduled: true };
+  if (tz) opts.timezone = tz;
+  const cronExpr = _getAzureBlobSasCheckCron();
+  _azureBlobExpiryTask = cron.schedule(cronExpr, () => {
+    _checkAzureBlobSasExpiry().catch(err => {
+      logger.error(`[scheduler] Azure Blob SAS check failed: ${err.message}`);
+    });
+  }, opts);
+  logger.info(`[scheduler] Azure Blob SAS expiry check registered — expr="${cronExpr}"` +
+    `${tz ? ` tz="${tz}"` : ' tz=system-local'}`);
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -260,6 +324,8 @@ async function shutdown(timeoutMs = 60_000) {
 
   for (const [id] of [..._cronTasks]) _cancelCron(id);
 
+  if (_azureBlobExpiryTask) { _azureBlobExpiryTask.stop(); _azureBlobExpiryTask = null; }
+
   const inFlight = [..._running.values()];
   if (inFlight.length === 0) return;
 
@@ -282,6 +348,7 @@ async function shutdown(timeoutMs = 60_000) {
 // SIGTERM is handled by server.js, which calls shutdown() directly.
 function init() {
   reloadAll();
+  _registerAzureBlobExpiryCheck();
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
@@ -292,6 +359,7 @@ function _setTransferRule(fn) { _transferRule = fn; }
 // Reset all mutable state between tests
 function _reset() {
   for (const [id] of [..._cronTasks]) _cancelCron(id);
+  if (_azureBlobExpiryTask) { _azureBlobExpiryTask.stop(); _azureBlobExpiryTask = null; }
   _running.clear();
   _shuttingDown = false;
 }
@@ -305,5 +373,5 @@ async function _testCronFire(ruleId) {
 
 module.exports = {
   init, runRule, reloadRule, reloadAll, getRunningJobs, shutdown,
-  _setTransferRule, _reset, _testCronFire,
+  _setTransferRule, _reset, _testCronFire, _checkAzureBlobSasExpiry,
 };

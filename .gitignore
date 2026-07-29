@@ -37,3 +37,7 @@ Thumbs.db
 # finding remains open. Revisit once C2 (credential store re-key) has shipped.
 SECURITY_REVIEW.md
 CC_SECURITY_FIX_PROMPTS.md
+
+# One-shot prompt-launcher scratch files — not durable project documentation,
+# superseded by the spec doc they kicked off (e.g. AZURE_BLOB_PROFILE.md)
+CC_PROMPT_*.md
