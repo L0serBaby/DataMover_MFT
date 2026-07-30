@@ -410,6 +410,19 @@ credentials, and DataMover never touches the account key. The operator opens the
 **Generate SAS** blade in a separate tab, works down the checklist, and pastes the result
 back into DataMover.
 
+### 7.2a Redesigned again, 2026-07-29 — one paste, not three fields
+
+The profile UI originally asked for `blobEndpoint`, `container`, and the SAS token as three
+separate inputs, requiring the operator to manually split the Portal's output apart. Since
+the Portal's **Blob SAS URL** field already contains all three
+(`https://account.blob.core.windows.net/container?sp=...&sig=...`), DataMover now asks for
+that single URL and derives `blobEndpoint` (the origin), `container` (the one path segment),
+and the SAS token (everything after `?`) from it server-side — see the new `splitSasUri()`
+in `app/executor.js`. **This reverses §7.6's original guidance**: the operator now copies
+the **Blob SAS URL**, not the bare **Blob SAS token** — the token alone no longer carries
+enough information to populate the profile. `prefix`/`recursive`/`archiveMode` remain
+separate fields; they aren't part of the SAS grant.
+
 ### 7.3 Checklist — full source + destination + archive (the common case)
 
 Field order and names verified against the Portal's container-level Generate SAS blade
@@ -425,12 +438,10 @@ Field order and names verified against the Portal's container-level Generate SAS
 | **Allowed protocols** | HTTPS only | Default, but confirm — do not leave it at "HTTPS and HTTP" |
 | **Signing key** | Key1 *(or Key2 — operator's choice)* | **Record whichever you pick** — rotating that key invalidates every SAS signed with it. Enter it in the profile's `signingKey` field after saving. |
 
-Then: **Generate SAS token and URL** → copy the **Blob SAS token** field —
-**not** the **Blob SAS URL** field. This is the one step most likely to trip someone up:
-the URL field prepends `https://account.blob.core.windows.net/container?` in front of the
-same query string, and DataMover's parser expects a bare query string (optionally with a
-leading `?`), not a full URL. See §7.5 for a proposed hardening of the parser itself so a
-mis-paste here fails clearly instead of confusingly.
+Then: **Generate SAS token and URL** → copy the **Blob SAS URL** field (per §7.2a — reversed
+from this checklist's original guidance). DataMover now derives the account endpoint and
+container from that URL automatically; pasting the bare **Blob SAS token** instead will be
+rejected with a clear error, since it no longer carries enough information on its own.
 
 ### 7.4 Checklist — narrower roles
 
@@ -462,8 +473,10 @@ UI effort, if that's preferred.
 - Account key requires the operator to hold Storage Account Key Operator rights or have the
   key available; the key itself is never entered into DataMover — only its identifier
   (Key1/Key2) is recorded, for the rotation-tracking reason above.
-- Copy the **Blob SAS token**, not the **Blob SAS URL** (§7.3).
-- The Blob SAS token value is shown once and cannot be retrieved after the blade closes —
+- Copy the **Blob SAS URL**, not the bare **Blob SAS token** (§7.2a/§7.3 — reversed from
+  this section's original guidance once DataMover started deriving endpoint/container from
+  the URL automatically).
+- The Blob SAS URL value is shown once and cannot be retrieved after the blade closes —
   save it immediately.
 
 ### 7.6 Renewal path
@@ -1224,3 +1237,56 @@ than taken on faith:**
   `_getScheduleTimezone()` already has, not a new one introduced here.
 
 **Nothing carried forward** — no defects found on review.
+
+---
+
+## 20. Post-deploy: single SAS-URI paste — landed 2026-07-29
+
+Deployed and confirmed working against the real container (Test Connection, browsing) after
+Phase 4, then redesigned per §7.2a: the profile UI's three separate
+blobEndpoint/container/SAS-token inputs became one paste of the Portal's **Blob SAS URL**,
+parsed server-side. Verified against the actual diff.
+
+**What shipped:**
+
+- `app/executor.js` — `splitSasUri(input)` (new, exported): parses a full Blob SAS URL via
+  the native `URL` class into `{ blobEndpoint, container, sasToken }`, rejecting a
+  non-URL, zero path segments, more than one segment (blob-level SAS, not container-level),
+  or no query string, each with a specific message. `normalizeSasToken(input)` (new,
+  exported): the URL-stripping logic extracted out of `parseSasToken`'s inline block,
+  reused in `getBlobContainerClient` as defense-in-depth for any credential-store entry
+  that predates this change.
+- `app/api/profiles.js` — `POST /` and `PUT /:id` accept a new `sasUri` field; when present,
+  `splitSasUri` derives `blobEndpoint`/`container`/token, overriding any directly-supplied
+  values. Direct `blobEndpoint`/`container`/`sasToken` fields still work unchanged
+  (back-compat, not actively rejected). `CRED_FILE` changed from `const` to `let`, with a
+  new `router._setCredFilePath()` test seam — added because exercising `POST`/`PUT` for
+  real in a test would otherwise write to the actual `data/credentials.enc`, tripping the
+  suite's real-data tripwire. Mirrors `router._setUsersFile()` in `app/api/auth.js` exactly;
+  checked both side by side, the pattern match is precise, not just similar in spirit.
+- `app/ui/app.js` — the three-field pane replaced with one `#pm-blob-sas-uri` input. Live
+  client-side confirmation line, more thorough than originally specified: distinguishes an
+  `se`-bearing token (shows parsed expiry/permissions), an `si`-only policy-backed token
+  (reveals the manual-expiry row), and neither (a specific "doesn't look like a valid SAS
+  URL" message) — not a single generic parse-or-fail. When editing an existing profile with
+  the field left blank, shows the currently-stored account/container/expiry instead. New
+  profiles require `sasUri`; there is no way to populate `blobEndpoint`/`container` through
+  the UI other than pasting a full URL, per §7.2a's decision to drop the manual fallback.
+  §7's wizard checklist guidance updated to match: copy the **Blob SAS URL**, not the bare
+  token — the reverse of what Phase 4 originally told operators to do.
+
+**Tests:** `tests/azure-blob.test.js` gained 5 `splitSasUri` cases (the worked
+`eda-landing` example, non-URL, zero segments, multi-segment, no query string) plus
+`normalizeSasToken` coverage, 50 total. `tests/azure-blob-expiry.test.js` gained 4 POST/PUT
+route-handler tests via the existing `findRouteHandler` pattern plus the new
+`_setCredFilePath` seam: URI-derived creation, invalid-URI rejection, direct-fields
+back-compat, and PUT re-pointing an existing profile — 27 total. Full suite: same two
+pre-existing failures, no new regressions.
+
+**Nothing carried forward** — no defects found on review.
+
+**Outstanding, not a code question:** `main` is 2 local commits ahead of `origin/main`
+(`4fdc3b4` "Add Azure Blob Storage profile type", `92cc2c8` "Bump version to 2.2.0" /
+tag `v2.2.0`) — covers Phases 1 through 4. This session's SAS-URI redesign
+(`executor.js`/`profiles.js`/`app.js`/both test files) is uncommitted on top of that,
+confirmed via `git status`. Neither committed nor pushed as of this writing.

@@ -1865,7 +1865,7 @@ VIEWS.profiles = function(el) {
 
     // Azure Blob: persistent status line for the currently-saved SAS token
     // (edit mode only) — distinct from the transient preview of whatever is
-    // currently typed into #pm-blob-sas (see updateBlobSasPreview below).
+    // currently pasted into #pm-blob-sas-uri (see updateBlobSasUriPreview below).
     function fmtSasStatusLine(sasMeta) {
       if (!sasMeta) return '';
       const permsText = sasMeta.permissions || '—';
@@ -1945,14 +1945,8 @@ VIEWS.profiles = function(el) {
       </div>
       <div id="pm-azure-blob" ${p.type!=='azure-blob'?'class="hidden"':''}>
         <div class="field">
-          <label>Blob endpoint</label>
-          <input id="pm-blob-endpoint" type="text" placeholder="https://account.blob.core.windows.net" value="${esc(p.blobEndpoint||'')}">
-        </div>
-        <div class="grid-2">
-          <div class="field"><label>Container</label>
-            <input id="pm-blob-container" type="text" value="${esc(p.container||'')}"></div>
-          <div class="field"><label>Prefix</label>
-            <input id="pm-blob-prefix" type="text" placeholder="inbound/ (optional, blank = container root)" value="${esc(p.prefix||'')}"></div>
+          <label>Prefix</label>
+          <input id="pm-blob-prefix" type="text" placeholder="inbound/ (optional, blank = container root)" value="${esc(p.prefix||'')}">
         </div>
         <div class="field">
           <label style="display:flex;align-items:center;gap:6px;font-weight:400;cursor:pointer">
@@ -1969,15 +1963,15 @@ VIEWS.profiles = function(el) {
           </select>
         </div>
         <div class="field">
-          <label>SAS token</label>
-          <input id="pm-blob-sas" type="password" autocomplete="new-password"
-            placeholder="${p.credentialRef ? '(stored — blank = keep)' : 'Paste SAS token'}">
+          <label>Blob SAS URL</label>
+          <input id="pm-blob-sas-uri" type="password" autocomplete="new-password"
+            placeholder="${p.credentialRef ? '(stored — blank = keep)' : 'Paste the Blob SAS URL from the Portal'}">
         </div>
         <div id="pm-blob-sas-expiry-row" class="field hidden">
           <label>Expiry (required — this token has no readable expiry)</label>
           <input id="pm-blob-sas-expiry" type="date">
         </div>
-        <div id="pm-blob-sas-preview" class="field-hint hidden" style="margin:-10px 0 12px"></div>
+        <div id="pm-blob-sas-confirm" class="field-hint hidden" style="margin:-10px 0 12px"></div>
         ${sasStatusHtml}
         <div class="field" style="margin-top:2px">
           <a id="pm-wizard-toggle" href="#" class="text-accent text-sm" style="text-decoration:none">Generate SAS checklist ▾</a>
@@ -2016,56 +2010,91 @@ VIEWS.profiles = function(el) {
       bodyEl.querySelector('#pm-key-row') .style.display = keyAuth ? ''     : 'none';
     });
 
-    // ── Azure Blob: instant client-side preview of a freshly-pasted SAS ──────
-    // Convenience hint only — executor.js's parseSasToken is the authoritative
-    // validator on save. Mirrors its leading-URL/leading-"?" stripping
-    // independently (client-side, not a shared code path).
-    function updateBlobSasPreview() {
-      const input     = bodyEl.querySelector('#pm-blob-sas');
-      const previewEl = bodyEl.querySelector('#pm-blob-sas-preview');
+    // ── Azure Blob: instant client-side preview of a freshly-pasted SAS URL ──
+    // Convenience hint only — executor.js's splitSasUri/parseSasToken are the
+    // authoritative validators on save. Mirrors their logic independently
+    // (client-side, not a shared code path).
+    function parseClientSasUri(raw) {
+      let url;
+      try {
+        url = new URL(raw);
+      } catch {
+        return { error: 'Invalid SAS URI: expected a full URL like "https://account.blob.core.windows.net/container?sp=...&sig=..." — paste the Blob SAS URL from the Portal, not just the token.' };
+      }
+      const segments = url.pathname.split('/').filter(Boolean);
+      if (segments.length === 0) {
+        return { error: 'Invalid SAS URI: no container name found in the URL path.' };
+      }
+      if (segments.length > 1) {
+        return { error: `Invalid SAS URI: path has ${segments.length} segments ("${url.pathname}") — DataMover requires a container-level SAS URL, not a blob-level one.` };
+      }
+      if (!url.search) {
+        return { error: 'Invalid SAS URI: no query string found — this looks like a plain container URL, not a SAS URL. Paste the Blob SAS URL from the Portal, which includes the SAS query string.' };
+      }
+      const params = new URLSearchParams(url.search.slice(1));
+      return {
+        blobEndpoint: url.origin,
+        container:    segments[0],
+        se: params.get('se'), si: params.get('si'), sp: params.get('sp'), sr: params.get('sr'),
+      };
+    }
+
+    function fmtStoredConnectionLine() {
+      if (!p.blobEndpoint && !p.container) return '';
+      const exp = p.sasMeta?.expiresAt ? new Date(p.sasMeta.expiresAt).toLocaleDateString() : '—';
+      return `Currently stored — Account: <code>${esc(p.blobEndpoint||'—')}</code> · Container: <code>${esc(p.container||'—')}</code> · Expires: ${esc(exp)}`;
+    }
+
+    function updateBlobSasUriPreview() {
+      const input     = bodyEl.querySelector('#pm-blob-sas-uri');
+      const confirmEl = bodyEl.querySelector('#pm-blob-sas-confirm');
       const expiryRow = bodyEl.querySelector('#pm-blob-sas-expiry-row');
-      if (!input) return;
+      if (!input || !confirmEl) return;
       const raw = input.value.trim();
+
       if (!raw) {
-        previewEl.classList.add('hidden');
         expiryRow.classList.add('hidden');
+        const stored = fmtStoredConnectionLine();
+        confirmEl.classList.remove('text-danger');
+        if (stored) {
+          confirmEl.innerHTML = stored;
+          confirmEl.classList.remove('hidden');
+        } else {
+          confirmEl.classList.add('hidden');
+        }
         return;
       }
 
-      let stripped = raw;
-      const urlMatch = /^https?:\/\/[^?]*\?(.*)$/i.exec(stripped);
-      if (urlMatch) stripped = urlMatch[1];
-      stripped = stripped.replace(/^\?/, '');
-
-      const params = new URLSearchParams(stripped);
-      const se = params.get('se');
-      const si = params.get('si');
-      const sp = params.get('sp');
-      const sr = params.get('sr');
-
-      if (se) {
+      const parsed = parseClientSasUri(raw);
+      confirmEl.classList.remove('hidden');
+      if (parsed.error) {
+        confirmEl.classList.add('text-danger');
+        confirmEl.textContent = parsed.error;
         expiryRow.classList.add('hidden');
-        previewEl.classList.remove('hidden');
-        previewEl.classList.remove('text-danger');
-        const d = new Date(se);
-        const dateStr = isNaN(d) ? se : d.toLocaleString();
-        previewEl.innerHTML = `Parsed: expires ${esc(dateStr)} · permissions <code>${esc(sp||'—')}</code> · resource <code>${esc(sr||'—')}</code>`;
-      } else if (si) {
-        previewEl.classList.add('hidden');
+        return;
+      }
+      confirmEl.classList.remove('text-danger');
+      if (parsed.se) {
+        expiryRow.classList.add('hidden');
+        const d = new Date(parsed.se);
+        const dateStr = isNaN(d) ? parsed.se : d.toLocaleString();
+        confirmEl.innerHTML = `Account: <code>${esc(parsed.blobEndpoint)}</code> · Container: <code>${esc(parsed.container)}</code> · Expires: ${esc(dateStr)} · Permissions: <code>${esc(parsed.sp||'—')}</code>`;
+      } else if (parsed.si) {
         expiryRow.classList.remove('hidden');
+        confirmEl.innerHTML = `Account: <code>${esc(parsed.blobEndpoint)}</code> · Container: <code>${esc(parsed.container)}</code> · Expires: policy-backed (enter below) · Permissions: <code>${esc(parsed.sp||'—')}</code>`;
       } else {
         expiryRow.classList.add('hidden');
-        previewEl.classList.remove('hidden');
-        previewEl.classList.add('text-danger');
-        previewEl.textContent = "No expiry (se) or policy (si) found — this doesn't look like a valid SAS query string";
+        confirmEl.classList.add('text-danger');
+        confirmEl.textContent = "No expiry (se) or policy (si) found in the SAS query string — this doesn't look like a valid SAS URL";
       }
     }
-    bodyEl.querySelector('#pm-blob-sas')?.addEventListener('input', updateBlobSasPreview);
-    bodyEl.querySelector('#pm-blob-sas')?.addEventListener('blur',  updateBlobSasPreview);
+    bodyEl.querySelector('#pm-blob-sas-uri')?.addEventListener('input', updateBlobSasUriPreview);
+    bodyEl.querySelector('#pm-blob-sas-uri')?.addEventListener('blur',  updateBlobSasUriPreview);
+    updateBlobSasUriPreview();
 
     // ── Azure Blob: Portal SAS-generation checklist (§7) — instructional
     // only. Submits nothing, calls no API; the operator works through the
-    // Portal separately and pastes the result into #pm-blob-sas above.
+    // Portal separately and pastes the result into #pm-blob-sas-uri above.
     const WIZARD_ROLES = {
       full:          { perms: ['Read','Add','Create','Write','Delete','List','Move','Execute'] },
       srcCopy:       { perms: ['Read','List'] },
@@ -2080,7 +2109,10 @@ VIEWS.profiles = function(el) {
       const roleKey    = bodyEl.querySelector('#pm-wizard-role').value;
       const role       = WIZARD_ROLES[roleKey] || WIZARD_ROLES.full;
       const expiry     = bodyEl.querySelector('#pm-wizard-expiry').value;
-      const container  = bodyEl.querySelector('#pm-blob-container').value.trim() || '(enter a container name above first)';
+      const uriRaw     = bodyEl.querySelector('#pm-blob-sas-uri').value.trim();
+      const uriParsed  = uriRaw ? parseClientSasUri(uriRaw) : null;
+      const container  = (uriParsed && !uriParsed.error && uriParsed.container) || p.container ||
+        '(paste the Blob SAS URL above, or generate one below and paste it back in)';
       const expiryStr  = expiry ? new Date(`${expiry}T00:00:00`).toLocaleDateString() : '(pick a date above)';
 
       const permRows = WIZARD_ALL_PERMS.map(label =>
@@ -2103,7 +2135,7 @@ VIEWS.profiles = function(el) {
         <div class="field-hint" style="margin-top:12px;line-height:1.6">
           <div>⚠ <strong>Signing method must be Account key.</strong> Microsoft's own walkthrough for this blade defaults its example to User delegation key, which silently caps expiry at 7 days regardless of what you enter — change it first, or every other value here is moot.</div>
           <div style="margin-top:6px">Record whichever signing key (Key1/Key2) you pick somewhere for rotation-tracking — rotating that key invalidates every SAS signed with it. DataMover does not persist this yet (no <code>signingKey</code> field wired into profile save).</div>
-          <div style="margin-top:6px">After generating: copy the <strong>Blob SAS token</strong> field, not the <strong>Blob SAS URL</strong> field, into the field above. (DataMover's parser now tolerates a mis-pasted URL as a fallback, but the token field is the correct one.)</div>
+          <div style="margin-top:6px">After generating: copy the <strong>Blob SAS URL</strong> field, not the bare <strong>Blob SAS token</strong> field, into the field above. The URL is what carries the account and container — DataMover derives both from it automatically. It's shown once and can't be retrieved after the blade closes, so save it immediately.</div>
         </div>`;
     }
 
@@ -2116,7 +2148,7 @@ VIEWS.profiles = function(el) {
     });
     bodyEl.querySelector('#pm-wizard-role')?.addEventListener('change', renderWizardChecklist);
     bodyEl.querySelector('#pm-wizard-expiry')?.addEventListener('change', renderWizardChecklist);
-    bodyEl.querySelector('#pm-blob-container')?.addEventListener('input', () => {
+    bodyEl.querySelector('#pm-blob-sas-uri')?.addEventListener('input', () => {
       if (!bodyEl.querySelector('#pm-wizard-body').classList.contains('hidden')) renderWizardChecklist();
     });
 
@@ -2154,14 +2186,12 @@ VIEWS.profiles = function(el) {
         }
         if (!payload.host) { errEl.textContent = 'Host is required for SFTP.'; errEl.classList.remove('hidden'); return; }
       } else if (type === 'azure-blob') {
-        payload.blobEndpoint = bodyEl.querySelector('#pm-blob-endpoint')  .value.trim();
-        payload.container    = bodyEl.querySelector('#pm-blob-container').value.trim();
         payload.prefix        = bodyEl.querySelector('#pm-blob-prefix')   .value.trim();
         payload.recursive     = bodyEl.querySelector('#pm-blob-recursive').checked;
         payload.archiveMode   = bodyEl.querySelector('#pm-blob-archive-mode').value;
 
-        const sasToken = bodyEl.querySelector('#pm-blob-sas').value;
-        if (sasToken) payload.sasToken = sasToken;
+        const sasUri = bodyEl.querySelector('#pm-blob-sas-uri').value.trim();
+        if (sasUri) payload.sasUri = sasUri;
 
         const expiryRow = bodyEl.querySelector('#pm-blob-sas-expiry-row');
         if (!expiryRow.classList.contains('hidden')) {
@@ -2169,9 +2199,7 @@ VIEWS.profiles = function(el) {
           if (expiryVal) payload.sasExpiresAt = new Date(`${expiryVal}T00:00:00Z`).toISOString();
         }
 
-        if (!payload.blobEndpoint) { errEl.textContent = 'Blob endpoint is required.'; errEl.classList.remove('hidden'); return; }
-        if (!payload.container)    { errEl.textContent = 'Container is required.';     errEl.classList.remove('hidden'); return; }
-        if (isNew && !sasToken)    { errEl.textContent = 'SAS token is required.';      errEl.classList.remove('hidden'); return; }
+        if (isNew && !sasUri) { errEl.textContent = 'Blob SAS URL is required.'; errEl.classList.remove('hidden'); return; }
       } else {
         payload.path = bodyEl.querySelector('#pm-path').value.trim();
         if (!payload.path) { errEl.textContent = 'Path is required.'; errEl.classList.remove('hidden'); return; }

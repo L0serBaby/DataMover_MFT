@@ -12,6 +12,12 @@
 // established in tests/azure-blob-transfer.test.js (needed for the
 // transferRule and POST /:id/test tests, which both list through a real
 // ContainerClient shape once the pre-flight allows the call through).
+//
+// Also covers POST/PUT /api/profiles' sasUri intake path (the single-paste
+// SAS URL redesign) — this is the only place these route handlers are
+// exercised at all, which is why profilesRouter._setCredFilePath() had to be
+// added: without it, POST/PUT's writeCredStore() would write to the real
+// repo's data/credentials.enc.
 
 const fs     = require('fs');
 const os     = require('os');
@@ -113,6 +119,11 @@ appCrypto._setCredentialsFilePath(path.join(DATA_DIR, 'credentials.enc'));
 
 const scheduler = require('../app/scheduler');
 const profilesRouter = require('../app/api/profiles');
+// profiles.js's credentials.enc path is hardcoded relative to __dirname by
+// default (no _setDataDir seam existed for it before this test needed to
+// exercise POST/PUT, which write credentials) — redirect it into DATA_DIR so
+// these tests can never touch the real repo's data/credentials.enc.
+profilesRouter._setCredFilePath(path.join(DATA_DIR, 'credentials.enc'));
 
 const { transferRule, classifySasExpiry, _getAzureBlobSasWarnDays } = executor;
 
@@ -129,8 +140,10 @@ function findRouteHandler(router, method, routePath) {
   return layer.route.stack[layer.route.stack.length - 1].handle;
 }
 
-const getProfilesHandler = findRouteHandler(profilesRouter, 'get', '/');
-const testProfileHandler = findRouteHandler(profilesRouter, 'post', '/:id/test');
+const getProfilesHandler  = findRouteHandler(profilesRouter, 'get', '/');
+const postProfileHandler  = findRouteHandler(profilesRouter, 'post', '/');
+const putProfileHandler   = findRouteHandler(profilesRouter, 'put', '/:id');
+const testProfileHandler  = findRouteHandler(profilesRouter, 'post', '/:id/test');
 
 function makeRes() {
   return {
@@ -168,6 +181,12 @@ function addCredential(id, sasToken) {
     : {};
   store[`azureblob_${id}`] = sasToken;
   fs.writeFileSync(credFile, appCrypto.encrypt(JSON.stringify(store)), 'utf8');
+}
+
+function readStoredCredential(ref) {
+  const credFile = path.join(DATA_DIR, 'credentials.enc');
+  const store = JSON.parse(appCrypto.decrypt(fs.readFileSync(credFile, 'utf8').trim()));
+  return store[ref];
 }
 
 // +0.5 day buffer absorbs wall-clock time elapsed between building a test
@@ -395,6 +414,73 @@ await test('POST /:id/test: azure-blob response sas object includes status along
   assert('permissions' in res._body.sas, 'existing Phase 1 field permissions unchanged');
   assert('capabilities' in res._body.sas, 'existing Phase 1 field capabilities unchanged');
   assert('notYetValid' in res._body.sas, 'existing Phase 1 field notYetValid unchanged');
+});
+
+// ── POST/PUT /api/profiles — sasUri intake (single-paste redesign) ──────────
+
+await test('POST /api/profiles: azure-blob profile created from sasUri derives blobEndpoint/container and stores the bare token', async () => {
+  writeProfiles([]);
+  const sasUri = 'https://acctxyz.blob.core.windows.net/mycontainer?sv=2024-11-04&sr=c&sp=racwdlme&se=2027-01-01T00:00:00Z&sig=abc123';
+  const req = makeReq({ body: { name: 'From URI', type: 'azure-blob', sasUri } });
+  const res = makeRes();
+  await postProfileHandler(req, res);
+
+  assertEqual(res._status, 201);
+  assertEqual(res._body.blobEndpoint, 'https://acctxyz.blob.core.windows.net');
+  assertEqual(res._body.container, 'mycontainer');
+  assert(!('sasToken' in res._body), 'sasToken must never be returned');
+  assert(res._body.credentialRef, 'credentialRef should be set');
+
+  const stored = readStoredCredential(res._body.credentialRef);
+  assertEqual(stored, 'sv=2024-11-04&sr=c&sp=racwdlme&se=2027-01-01T00:00:00Z&sig=abc123');
+  assert(!stored.includes('https://'), 'stored credential must be the bare token, not the URL');
+});
+
+await test('POST /api/profiles: azure-blob profile rejects an invalid sasUri with 400', async () => {
+  writeProfiles([]);
+  const req = makeReq({ body: { name: 'Bad URI', type: 'azure-blob', sasUri: 'not-a-url' } });
+  const res = makeRes();
+  await postProfileHandler(req, res);
+  assertEqual(res._status, 400);
+  assert(/expected a full URL/i.test(res._body.error), `unexpected error message: ${res._body.error}`);
+});
+
+await test('POST /api/profiles: azure-blob profile still accepts direct blobEndpoint/container/sasToken fields (back-compat, no sasUri)', async () => {
+  writeProfiles([]);
+  const req = makeReq({ body: {
+    name: 'Direct Fields', type: 'azure-blob',
+    blobEndpoint: 'https://directacct.blob.core.windows.net',
+    container:    'directcontainer',
+    sasToken:     'sv=2024-11-04&sr=c&sp=racwdlme&se=2027-01-01T00:00:00Z&sig=direct123',
+  } });
+  const res = makeRes();
+  await postProfileHandler(req, res);
+
+  assertEqual(res._status, 201);
+  assertEqual(res._body.blobEndpoint, 'https://directacct.blob.core.windows.net');
+  assertEqual(res._body.container, 'directcontainer');
+  const stored = readStoredCredential(res._body.credentialRef);
+  assertEqual(stored, 'sv=2024-11-04&sr=c&sp=racwdlme&se=2027-01-01T00:00:00Z&sig=direct123');
+});
+
+await test('PUT /api/profiles/:id: azure-blob profile updates blobEndpoint/container/credential when a new sasUri is pasted', async () => {
+  writeProfiles([
+    makeBlobProfile('putme', {
+      blobEndpoint: 'https://old.blob.core.windows.net',
+      container:    'oldcontainer',
+      sasMeta:      { expiresAt: daysFromNow(5) },
+    }),
+  ]);
+  const newUri = 'https://newacct.blob.core.windows.net/newcontainer?sv=2024-11-04&sr=c&sp=racwdlme&se=2028-01-01T00:00:00Z&sig=newsig';
+  const req = makeReq({ params: { id: 'putme' }, body: { sasUri: newUri } });
+  const res = makeRes();
+  await putProfileHandler(req, res);
+
+  assertEqual(res._status, 200);
+  assertEqual(res._body.blobEndpoint, 'https://newacct.blob.core.windows.net');
+  assertEqual(res._body.container, 'newcontainer');
+  const stored = readStoredCredential(res._body.credentialRef);
+  assertEqual(stored, 'sv=2024-11-04&sr=c&sp=racwdlme&se=2028-01-01T00:00:00Z&sig=newsig');
 });
 
 // ── transferRule pre-flight ──────────────────────────────────────────────────

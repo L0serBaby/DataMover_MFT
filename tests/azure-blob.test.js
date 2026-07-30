@@ -9,7 +9,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const {
-  redactSas, parseSasToken, resolveBlobPrefix,
+  redactSas, parseSasToken, normalizeSasToken, splitSasUri, resolveBlobPrefix,
   wrapBlobError, blobListFiles, blobGetFile,
 } = require('../app/executor');
 
@@ -214,6 +214,71 @@ await test('parseSasToken rejects a non-parseable se value', async () => {
 await test('parseSasToken ipRange maps from sip', async () => {
   const token = 'sv=2024-11-04&sr=c&se=2027-01-01T00:00:00Z&sip=10.0.0.1-10.0.0.255&sig=abc';
   assertEqual(parseSasToken(token).ipRange, '10.0.0.1-10.0.0.255');
+});
+
+// ── normalizeSasToken ────────────────────────────────────────────────────────
+
+await test('normalizeSasToken passes a bare query string through unchanged', async () => {
+  assertEqual(normalizeSasToken('sv=2024-11-04&sr=c&sig=abc'), 'sv=2024-11-04&sr=c&sig=abc');
+});
+
+await test('normalizeSasToken strips a leading "?"', async () => {
+  assertEqual(normalizeSasToken('?sv=2024-11-04&sig=abc'), 'sv=2024-11-04&sig=abc');
+});
+
+await test('normalizeSasToken strips a full URL down to its query string', async () => {
+  assertEqual(
+    normalizeSasToken('https://acct.blob.core.windows.net/c?sv=2024-11-04&sig=abc'),
+    'sv=2024-11-04&sig=abc'
+  );
+});
+
+await test('normalizeSasToken rejects a full URL with no query string', async () => {
+  await assertThrows(
+    () => normalizeSasToken('https://acct.blob.core.windows.net/c'),
+    /Blob SAS token, not the Blob SAS URL/
+  );
+});
+
+// ── splitSasUri ──────────────────────────────────────────────────────────────
+
+await test('splitSasUri splits a realistic container-scoped Blob SAS URL', async () => {
+  const uri =
+    'https://staldlsedadeveus.blob.core.windows.net/eda-landing' +
+    '?sp=racwdlme&st=2026-07-29T00:00:00Z&se=2027-07-29T00:00:00Z&spr=https&sv=2024-11-04&sr=c&sig=AbC123%2Fxyz%3D';
+  const split = splitSasUri(uri);
+  assertEqual(split.blobEndpoint, 'https://staldlsedadeveus.blob.core.windows.net');
+  assertEqual(split.container, 'eda-landing');
+  assertEqual(
+    split.sasToken,
+    'sp=racwdlme&st=2026-07-29T00:00:00Z&se=2027-07-29T00:00:00Z&spr=https&sv=2024-11-04&sr=c&sig=AbC123%2Fxyz%3D'
+  );
+  // Round-trips cleanly into parseSasToken.
+  const meta = parseSasToken(split.sasToken);
+  assertEqual(meta.source, 'parsed');
+  assertEqual(meta.permissions, 'racwdlme');
+});
+
+await test('splitSasUri rejects a non-URL input', async () => {
+  await assertThrows(() => splitSasUri('not a url at all'), /expected a full URL/i);
+});
+
+await test('splitSasUri rejects a URL with zero path segments', async () => {
+  await assertThrows(() => splitSasUri('https://acct.blob.core.windows.net/?sp=r&sig=abc'), /no container name/i);
+});
+
+await test('splitSasUri rejects a URL with more than one path segment (blob-level SAS)', async () => {
+  await assertThrows(
+    () => splitSasUri('https://acct.blob.core.windows.net/container/blob.csv?sp=r&sig=abc'),
+    /2 segments/i
+  );
+});
+
+await test('splitSasUri rejects a URL with no query string', async () => {
+  await assertThrows(
+    () => splitSasUri('https://acct.blob.core.windows.net/container'),
+    /no query string found/i
+  );
 });
 
 // ── resolveBlobPrefix ────────────────────────────────────────────────────────

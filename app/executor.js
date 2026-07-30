@@ -476,6 +476,74 @@ function parseSasDate(value, paramName) {
 }
 
 /**
+ * Strips a SAS token down to its bare query string. The Portal's Generate
+ * SAS blade offers both a bare "Blob SAS token" and a full "Blob SAS URL"
+ * (the same query string with the container URL prepended); tolerate the
+ * URL by mistake rather than failing with an unhelpful "missing se/si" — but
+ * a URL with no query string at all can't be salvaged, so name the actual
+ * problem instead of falling through. Also used defense-in-depth wherever a
+ * stored credential is read back, in case it predates splitSasUri() or was
+ * written directly via the API's blobEndpoint/container/sasToken fields.
+ */
+function normalizeSasToken(input) {
+  let s = String(input ?? '').trim();
+  if (/^https?:\/\//i.test(s)) {
+    const qIdx = s.indexOf('?');
+    if (qIdx === -1) {
+      throw new Error(
+        'Invalid SAS token: looks like a full URL with no query string — copy the Blob SAS token, not the Blob SAS URL'
+      );
+    }
+    s = s.slice(qIdx + 1);
+  }
+  return s.replace(/^\?/, '');
+}
+
+/**
+ * Splits a full container-scoped Blob SAS URL, exactly as copied from the
+ * Portal's Generate SAS blade, into DataMover's three profile components.
+ *   https://account.blob.core.windows.net/container?sp=...&sig=...
+ *     -> { blobEndpoint: "https://account.blob.core.windows.net",
+ *          container: "container", sasToken: "sp=...&sig=..." }
+ * This is now the primary intake path for azure-blob profiles (§7.2a).
+ */
+function splitSasUri(input) {
+  const raw = String(input ?? '').trim();
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(
+      'Invalid SAS URI: expected a full URL like ' +
+      '"https://account.blob.core.windows.net/container?sp=...&sig=..." ' +
+      '— paste the Blob SAS URL from the Portal, not just the token.'
+    );
+  }
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (segments.length === 0) {
+    throw new Error('Invalid SAS URI: no container name found in the URL path.');
+  }
+  if (segments.length > 1) {
+    throw new Error(
+      `Invalid SAS URI: path has ${segments.length} segments ("${url.pathname}") — ` +
+      `DataMover requires a container-level SAS URL, not a blob-level one.`
+    );
+  }
+  if (!url.search) {
+    throw new Error(
+      'Invalid SAS URI: no query string found — this looks like a plain container URL, ' +
+      'not a SAS URL. Paste the Blob SAS URL from the Portal, which includes the SAS ' +
+      'query string.'
+    );
+  }
+  return {
+    blobEndpoint: url.origin,
+    container:    segments[0],
+    sasToken:     url.search.slice(1),
+  };
+}
+
+/**
  * Parses a container-scoped SAS token's query parameters into the sasMeta
  * shape persisted on an azure-blob profile. Pure — no network. Tolerates a
  * leading "?". signingKey is always null: it is operator-entered (which
@@ -485,22 +553,8 @@ function parseSasToken(token) {
   if (typeof token !== 'string' || !token.trim()) {
     throw new Error('Invalid SAS token: token is empty');
   }
-  let trimmed = token.trim();
-  // The Portal's Generate SAS blade offers both a bare "Blob SAS token" and a
-  // full "Blob SAS URL" (the same query string with the container URL
-  // prepended). Tolerate the URL by mistake rather than failing with an
-  // unhelpful "missing se/si" — but a URL with no query string at all can't
-  // be salvaged, so name the actual problem instead of falling through.
-  if (/^https?:\/\//i.test(trimmed)) {
-    const qIdx = trimmed.indexOf('?');
-    if (qIdx === -1) {
-      throw new Error(
-        'Invalid SAS token: looks like a full URL with no query string — copy the Blob SAS token, not the Blob SAS URL'
-      );
-    }
-    trimmed = trimmed.slice(qIdx + 1);
-  }
-  const params = new URLSearchParams(trimmed.replace(/^\?/, ''));
+  const normalized = normalizeSasToken(token);
+  const params = new URLSearchParams(normalized);
 
   const sr = params.get('sr');
   if (sr && sr !== 'c') {
@@ -598,7 +652,7 @@ function resolveBlobPrefix(profile, rulePath) {
  */
 function getBlobContainerClient(profile) {
   const sas      = resolveCredential(profile.credentialRef);
-  const sasQuery = String(sas).trim().replace(/^\?/, '');
+  const sasQuery = normalizeSasToken(sas);
   const endpoint = (profile.blobEndpoint || '').replace(/\/+$/, '');
   const container = (profile.container || '').replace(/^\/+/, '').replace(/\/+$/, '');
   return new ContainerClient(`${endpoint}/${container}?${sasQuery}`);
@@ -1844,7 +1898,8 @@ function _setDataDir(dir) {
 module.exports = {
   copyFile, moveFile, deleteFile, listFiles, transferRule, _setDataDir,
   sanitizeRemoteName, assertWithin,
-  redactSas, wrapBlobError, parseSasToken, resolveBlobPrefix, getBlobContainerClient,
+  redactSas, wrapBlobError, parseSasToken, normalizeSasToken, splitSasUri,
+  resolveBlobPrefix, getBlobContainerClient,
   blobListFiles, blobGetFile, blobPutFile, blobDeleteFile,
   isPrivateIPv4, probeDfsCapability, resolveDfsCapability, getDataLakeFileSystemClient,
   _getAzureBlobCapabilityTtlHours, _getAzureBlobDfsProbeTimeoutMs,

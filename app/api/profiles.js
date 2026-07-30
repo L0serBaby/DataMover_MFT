@@ -13,11 +13,18 @@ const { requireAuth, requireAdmin, requireSetupComplete } = require('../auth');
 const logger               = require('../logger');
 const { renameWithRetry }  = require('../fs-utils');
 const {
-  parseSasToken, redactSas, getBlobContainerClient, blobListFiles,
+  parseSasToken, normalizeSasToken, splitSasUri, redactSas,
+  getBlobContainerClient, blobListFiles,
   classifySasExpiry, _getAzureBlobSasWarnDays,
 } = require('../executor');
 
-const CRED_FILE = path.join(__dirname, '../../data/credentials.enc');
+let CRED_FILE = path.join(__dirname, '../../data/credentials.enc');
+
+// Overridable via router._setCredFilePath() for testing — never call in
+// production. Mirrors router._setUsersFile() in app/api/auth.js.
+function _setCredFilePath(p) {
+  CRED_FILE = p;
+}
 
 // ── Credential store helpers ──────────────────────────────────────────────────
 
@@ -104,7 +111,7 @@ router.get('/', (req, res) => {
 // POST /api/profiles
 router.post('/', requireAdmin, async (req, res) => {
   try {
-    const { password, sasToken, sasExpiresAt, ...body } = req.body || {};
+    const { password, sasToken, sasUri, sasExpiresAt, ...body } = req.body || {};
     if (!body.name) return res.status(400).json({ error: 'name is required' });
     if (!body.type) return res.status(400).json({ error: 'type is required' });
 
@@ -125,22 +132,36 @@ router.post('/', requireAdmin, async (req, res) => {
         store[ref] = password;
         writeCredStore(store);
       }
-    } else if (profile.type === 'azure-blob' && sasToken) {
-      let sasMeta;
-      try {
-        sasMeta = parseSasToken(sasToken);
-      } catch (err) {
-        return res.status(400).json({ error: err.message });
+    } else if (profile.type === 'azure-blob') {
+      let effectiveSasToken = sasToken;
+      if (sasUri) {
+        let split;
+        try {
+          split = splitSasUri(sasUri);
+        } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
+        profile.blobEndpoint = split.blobEndpoint;
+        profile.container    = split.container;
+        effectiveSasToken    = split.sasToken;
       }
-      if (sasMeta.source === 'manual' && sasExpiresAt) {
-        sasMeta.expiresAt = new Date(sasExpiresAt).toISOString();
+      if (effectiveSasToken) {
+        let sasMeta;
+        try {
+          sasMeta = parseSasToken(effectiveSasToken);
+        } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
+        if (sasMeta.source === 'manual' && sasExpiresAt) {
+          sasMeta.expiresAt = new Date(sasExpiresAt).toISOString();
+        }
+        const ref = profile.credentialRef || `azureblob_${profile.id}`;
+        profile.credentialRef = ref;
+        const store = readCredStore();
+        store[ref] = normalizeSasToken(effectiveSasToken);
+        writeCredStore(store);
+        profile.sasMeta = sasMeta;
       }
-      const ref = profile.credentialRef || `azureblob_${profile.id}`;
-      profile.credentialRef = ref;
-      const store = readCredStore();
-      store[ref] = sasToken;
-      writeCredStore(store);
-      profile.sasMeta = sasMeta;
     }
 
     const profiles = data.read('profiles.json');
@@ -159,7 +180,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
     const idx = profiles.findIndex(p => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'Profile not found' });
 
-    const { password, sasToken, sasExpiresAt, ...body } = req.body || {};
+    const { password, sasToken, sasUri, sasExpiresAt, ...body } = req.body || {};
     const existing = profiles[idx];
     const updated  = { ...existing, ...body, id: existing.id };
 
@@ -174,22 +195,36 @@ router.put('/:id', requireAdmin, async (req, res) => {
         store[ref] = password;
         writeCredStore(store);
       }
-    } else if (updated.type === 'azure-blob' && sasToken) {
-      let sasMeta;
-      try {
-        sasMeta = parseSasToken(sasToken);
-      } catch (err) {
-        return res.status(400).json({ error: err.message });
+    } else if (updated.type === 'azure-blob') {
+      let effectiveSasToken = sasToken;
+      if (sasUri) {
+        let split;
+        try {
+          split = splitSasUri(sasUri);
+        } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
+        updated.blobEndpoint = split.blobEndpoint;
+        updated.container    = split.container;
+        effectiveSasToken    = split.sasToken;
       }
-      if (sasMeta.source === 'manual' && sasExpiresAt) {
-        sasMeta.expiresAt = new Date(sasExpiresAt).toISOString();
+      if (effectiveSasToken) {
+        let sasMeta;
+        try {
+          sasMeta = parseSasToken(effectiveSasToken);
+        } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
+        if (sasMeta.source === 'manual' && sasExpiresAt) {
+          sasMeta.expiresAt = new Date(sasExpiresAt).toISOString();
+        }
+        const ref = updated.credentialRef || `azureblob_${updated.id}`;
+        updated.credentialRef = ref;
+        const store = readCredStore();
+        store[ref] = normalizeSasToken(effectiveSasToken);
+        writeCredStore(store);
+        updated.sasMeta = sasMeta;
       }
-      const ref = updated.credentialRef || `azureblob_${updated.id}`;
-      updated.credentialRef = ref;
-      const store = readCredStore();
-      store[ref] = sasToken;
-      writeCredStore(store);
-      updated.sasMeta = sasMeta;
     }
 
     profiles[idx] = updated;
@@ -351,5 +386,7 @@ router.get('/:id/browse', requireAdmin, async (req, res) => {
     res.status(400).json({ error: redactSas(err.message) });
   }
 });
+
+router._setCredFilePath = _setCredFilePath;
 
 module.exports = router;
