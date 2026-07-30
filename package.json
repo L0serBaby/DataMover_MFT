@@ -1,6 +1,6 @@
 {
   "name": "datamover",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Managed File Transfer application replacing GlobalScape EFT",
   "main": "app/server.js",
   "scripts": {
