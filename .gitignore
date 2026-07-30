@@ -41,3 +41,18 @@ CC_SECURITY_FIX_PROMPTS.md
 # One-shot prompt-launcher scratch files — not durable project documentation,
 # superseded by the spec doc they kicked off (e.g. AZURE_BLOB_PROFILE.md)
 CC_PROMPT_*.md
+
+# Internal-only docs — name the employer, internal vendor names, or service
+# account identifiers (AmeriLife, Arcus, srv_datamover), or are internal working
+# notes not meant for a public remote. Kept local, never pushed to the public remote.
+CLAUDE.md
+CLAUDE-cloud.md
+GS_IMPORT_RULES.md
+PROJECT_INSTRUCTIONS.md
+AZURE_BLOB_PROFILE.md
+BACKLOG.md
+DEV_NOTES.md
+SESSION_LOGS.md
+
+# Test suite — not part of the public deliverable
+tests/
